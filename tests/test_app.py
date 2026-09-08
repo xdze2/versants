@@ -22,6 +22,7 @@ from valleespyr.app import (  # noqa: E402
     _catchment_tree_lines,
     _fc_bounds,
     river_deck,
+    river_figure,
 )
 from valleespyr.hydro.network import build_graph  # noqa: E402
 from valleespyr.hydro.rivers import build_river_network  # noqa: E402
@@ -137,10 +138,39 @@ def test_river_deck_draws_the_catchment_area_polygon_when_given_one():
     bare = river_deck({"type": "FeatureCollection", "features": []}, fc_lines)
     assert "catchment_area" not in {layer.id for layer in bare.layers}  # no polygon -> no wash
 
-    deck = river_deck(
-        {"type": "FeatureCollection", "features": []}, fc_lines, catchment_area=poly
-    )
+    deck = river_deck({"type": "FeatureCollection", "features": []}, fc_lines, catchment_area=poly)
     assert "catchment_area" in {layer.id for layer in deck.layers}
+
+
+def test_river_figure_draws_course_catchment_and_area(rn):
+    plt = pytest.importorskip("matplotlib.pyplot")
+    from shapely.geometry import Polygon
+
+    main = rn.by_name("Main", exact=True)[0]
+    poly = Polygon([(-0.06, 42.74), (0.03, 42.74), (0.03, 42.87), (-0.06, 42.87)])
+    fig = river_figure(rn, main.id, catchment_area=poly, area_km2=42.0, n_sub_basins=3)
+    assert fig is not None
+    ax = fig.axes[0]
+    # the polygon patch plus the catchment and course line collections
+    assert ax.collections
+    assert "Main" in ax.get_title() and "42" in ax.get_title()
+    plt.close(fig)
+
+
+def test_river_figure_without_a_catchment_polygon(rn):
+    plt = pytest.importorskip("matplotlib.pyplot")
+
+    main = rn.by_name("Main", exact=True)[0]
+    fig = river_figure(rn, main.id)
+    assert fig is not None
+    # no sub-basin count -> no area in the title
+    assert "km" not in fig.axes[0].get_title()
+    plt.close(fig)
+
+
+def test_river_figure_none_for_unknown_river(rn):
+    pytest.importorskip("matplotlib.pyplot")
+    assert river_figure(rn, "NOT_A_RIVER") is None
 
 
 def test_catchment_tree_lines_nest_children_biggest_first(rn):
@@ -152,9 +182,9 @@ def test_catchment_tree_lines_nest_children_biggest_first(rn):
     # Creek is nested under Trib -> more indented
     trib_line = next(line for line in lines if "Trib" in line)
     creek_line = next(line for line in lines if "Creek" in line)
-    assert len(creek_line) - len(creek_line.lstrip(" │├└─")) > len(
-        trib_line
-    ) - len(trib_line.lstrip(" │├└─"))
+    assert len(creek_line) - len(creek_line.lstrip(" │├└─")) > len(trib_line) - len(
+        trib_line.lstrip(" │├└─")
+    )
 
 
 # ---------------------------------------------------------------- offline sample

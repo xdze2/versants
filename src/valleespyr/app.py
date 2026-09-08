@@ -17,6 +17,7 @@ Everything after the initial load is graph work on the in-memory
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -252,6 +253,65 @@ def river_deck(
     )
 
 
+def river_figure(
+    rn: RiverNetwork,
+    river_id: str,
+    *,
+    catchment_area=None,
+    area_km2: float = 0.0,
+    n_sub_basins: int = 0,
+):
+    """Static matplotlib map of a river: catchment wash, tributaries, own course.
+
+    The print/export counterpart to :func:`river_deck` — no base map, no picking,
+    equal-aspect lon/lat axes. Returns a matplotlib ``Figure``, or ``None`` if the
+    river has no geometry.
+    """
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+
+    river = rn.get(river_id)
+    if river is None:
+        return None
+    course_fc = rn.river_path_geojson(river_id)
+    catchment_fc = rn.river_catchment_geojson(river_id)
+    if not course_fc["features"] and not catchment_fc["features"]:
+        return None
+
+    fig, ax = plt.subplots(figsize=(7, 8))
+    if catchment_area is not None and not catchment_area.is_empty:
+        gpd.GeoSeries([catchment_area], crs="EPSG:4326").plot(
+            ax=ax, color="lightsteelblue", edgecolor="steelblue", linewidth=0.8, zorder=1
+        )
+    if catchment_fc["features"]:
+        gpd.GeoDataFrame.from_features(catchment_fc["features"], crs="EPSG:4326").plot(
+            ax=ax, color="tab:blue", linewidth=0.7, zorder=2
+        )
+    if course_fc["features"]:
+        gpd.GeoDataFrame.from_features(course_fc["features"], crs="EPSG:4326").plot(
+            ax=ax, color="orangered", linewidth=2.5, zorder=3
+        )
+
+    title = river.name or river.id
+    if n_sub_basins:
+        title += f" — {area_km2:,.0f} km², {n_sub_basins} sub-basin"
+        title += "" if n_sub_basins == 1 else "s"
+    ax.set_title(title)
+    # lon/lat degrees are not equal lengths; ~1/cos(lat) keeps the shape honest.
+    ax.set_aspect(1 / math.cos(math.radians(ax.get_ylim()[0] or 42.8)))
+    fig.tight_layout()
+    return fig
+
+
+def _figure_png(fig) -> bytes:
+    """Render a matplotlib figure to PNG bytes for the download button."""
+    import io
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    return buf.getvalue()
+
+
 def _picked_river(event, s2r: dict[str, str]) -> str | None:
     """River id for a feature clicked on the catchment layer, or None."""
     if not event or not getattr(event, "selection", None):
@@ -416,38 +476,68 @@ def _river_view(rn: RiverNetwork, path_str: str, bassins_path: str | None = None
     show_panel = st.sidebar.toggle(
         "Show info panel", value=True, key="show_panel", help="Collapse it for a full-width map."
     )
+    static_map = st.sidebar.toggle(
+        "Static map",
+        value=False,
+        key="static_map",
+        help="Plain matplotlib figure — no base map or picking, but it prints and exports cleanly.",
+    )
 
     left, right = st.columns([3, 2], gap="medium") if show_panel else (st.container(), None)
     map_height = 620 if show_panel else 800
 
     with left:
-        deck = river_deck(
-            course_fc,
-            catchment_fc,
-            picked_river_id=ss.picked_trib,
-            segment_to_river=rn.segment_to_river,
-            catchment_area=area_poly,
-        )
-        event = st.pydeck_chart(
-            deck,
-            width="stretch",
-            height=map_height,
-            on_select="rerun",
-            selection_mode="single-object",
-            # Re-key per river so the widget remounts and actually applies the
-            # new initial_view_state — pydeck-in-Streamlit keeps the old camera
-            # across plain reruns, which left every basin framed at Europe zoom.
-            key=f"deck_{river.id}",
-        )
-        hit = _picked_river(event, rn.segment_to_river)
-        if hit and hit != ss.picked_trib:
-            ss.picked_trib = hit
-            st.rerun()
-        wash = " · pale-blue wash = drainage area" if area_poly is not None else ""
-        st.caption(
-            f"Orange = {river.name or 'this river'}'s course · blue = its catchment "
-            f"stream network{wash} · click any blue reach to select that tributary."
-        )
+        if static_map:
+            fig = river_figure(
+                rn,
+                river.id,
+                catchment_area=area_poly,
+                area_km2=area_km2,
+                n_sub_basins=area_covered,
+            )
+            if fig is None:
+                st.info("No geometry to draw for this river.")
+            else:
+                st.pyplot(fig, width="stretch")
+                st.download_button(
+                    "Download PNG",
+                    _figure_png(fig),
+                    file_name=f"{(river.name or river.id).replace(' ', '_')}.png",
+                    mime="image/png",
+                )
+            st.caption(
+                f"Orange = {river.name or 'this river'}'s course · blue = its catchment "
+                "stream network · pale blue = drainage area. Switch off *Static map* "
+                "in the sidebar to pick tributaries on the interactive map."
+            )
+        else:
+            deck = river_deck(
+                course_fc,
+                catchment_fc,
+                picked_river_id=ss.picked_trib,
+                segment_to_river=rn.segment_to_river,
+                catchment_area=area_poly,
+            )
+            event = st.pydeck_chart(
+                deck,
+                width="stretch",
+                height=map_height,
+                on_select="rerun",
+                selection_mode="single-object",
+                # Re-key per river so the widget remounts and actually applies the
+                # new initial_view_state — pydeck-in-Streamlit keeps the old camera
+                # across plain reruns, which left every basin framed at Europe zoom.
+                key=f"deck_{river.id}",
+            )
+            hit = _picked_river(event, rn.segment_to_river)
+            if hit and hit != ss.picked_trib:
+                ss.picked_trib = hit
+                st.rerun()
+            wash = " · pale-blue wash = drainage area" if area_poly is not None else ""
+            st.caption(
+                f"Orange = {river.name or 'this river'}'s course · blue = its catchment "
+                f"stream network{wash} · click any blue reach to select that tributary."
+            )
 
     if right is not None:
         with right:

@@ -30,6 +30,7 @@ viz = [
 app = [
     "streamlit>=1.30",
     "pydeck>=0.9",
+    "matplotlib>=3.8",
 ]
 dev = [
     "pytest>=8.0",

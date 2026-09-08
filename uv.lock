@@ -2036,6 +2036,7 @@ dependencies = [
 
 [package.optional-dependencies]
 app = [
+    { name = "matplotlib" },
     { name = "pydeck" },
     { name = "streamlit" },
 ]
@@ -2059,6 +2060,7 @@ viz = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "geopandas", specifier = ">=1.0" },
+    { name = "matplotlib", marker = "extra == 'app'", specifier = ">=3.8" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.8" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "pyarrow", specifier = ">=16.0" },
