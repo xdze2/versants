@@ -35,10 +35,28 @@ always splits, though: 1039 of the 1042 junction nodes in the sample both end on
 tronçon and start another. Rolling these up into whole rivers is what
 `hydro/rivers.py` does.
 
+*How segments connect.* There is no explicit "next segment" field, and none is
+needed: each tronçon carries an upstream node id (`..._ini`) and a downstream one
+(`..._fin`), drawn from a shared `NOEUDHYD…` namespace. Two segments are joined
+when they name the same node — B follows A when `B.ini == A.fin`. That is the
+whole topology, and it is complete in the sample: all 3097 segments carry both
+ids, and 3045 of them have a downstream neighbour. The 52 that don't are outlets
+where the bbox clips the network, not missing data.
+
+Two things make this less mechanical than it sounds. The node ids say how
+segments *touch*, not which way water flows — that comes from
+`sens_de_l_ecoulement`, and for `Sens inverse` the two nodes must be swapped
+before the edge is added. And the graph is not one connected network: the
+Gavarnie sample yields 39 weakly connected components, the largest holding 78% of
+nodes. The rest are pieces the bbox cut off from their trunk plus 54 Spanish-side
+segments (`code_du_pays = ES`) that BD TOPO does not carry across the border. A
+river whose outlet falls outside the extent therefore surfaces as a *root* — dump
+a wider bbox to attach it. Flow itself is acyclic, so the result is a DAG.
+
 | Attribute | Why we use it |
 |---|---|
 | `cleabs` | Stable segment id; the key the map picks features by |
-| `lien_vers_noeud_hydrographique_ini` / `_fin` | Start/end node — these build the graph |
+| `lien_vers_noeud_hydrographique_ini` / `_fin` | Upstream/downstream node ids — **this is the connectivity** (see below) |
 | `sens_de_l_ecoulement` | Flow direction. `Sens inverse` means the drawn geometry points *upstream* and the two nodes must be swapped; `Double sens` (tidal/canal) is ambiguous |
 | `liens_vers_cours_d_eau` | The watercourse a segment belongs to — the roll-up key from segments to rivers |
 | `cpx_toponyme_de_cours_d_eau` | River name (only ~38% of segments carry one) |
