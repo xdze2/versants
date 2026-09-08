@@ -11,6 +11,10 @@ from . import watershed as ws
 from .dump import dump_layer
 from .sources.wfs import GEOPLATEFORME_WFS, LAYER_BASSIN_VERSANT, WFSClient, WFSError
 
+TRONCON_BBOX_HELP = (
+    "Bounding box as 'minx,miny,maxx,maxy' (lon/lat WGS84) to fetch tronçons live."
+)
+
 BBOX_HELP = "Bounding box as 'minx,miny,maxx,maxy' (lon/lat WGS84 unless --bbox-crs given)."
 
 
@@ -208,6 +212,152 @@ def wfs_dump(
     except (WFSError, OSError, RuntimeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"wrote {count} features to {output}", err=True)
+
+
+@cli.group()
+def hydro() -> None:
+    """Stream-network topology (BD TOPO tronçon_hydrographique)."""
+
+
+@hydro.command("tree")
+@click.option(
+    "--from-file",
+    "from_file",
+    default=None,
+    help="Local tronçon dump (GeoJSON/GeoParquet). Offline; skips the WFS.",
+)
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option(
+    "--point",
+    "point_s",
+    default=None,
+    help="Pour point 'lon,lat' WGS84. Defaults to the bbox / file centroid.",
+)
+@click.option(
+    "--min-order", type=int, default=None, help="Prune branches below this Strahler order."
+)
+@click.option("--no-fictif", is_flag=True, help="Hide fictitious edges (lake/void connectors).")
+@click.option("--no-collapse", is_flag=True, help="Do not fold unbranched same-river chains.")
+@click.option("--max-depth", type=int, default=None, help="Limit printed tree depth.")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Emit the nested dict as JSON, not a tree."
+)
+@click.pass_context
+def hydro_tree(
+    ctx: click.Context,
+    from_file: str | None,
+    bbox_s: str | None,
+    point_s: str | None,
+    min_order: int | None,
+    no_fictif: bool,
+    no_collapse: bool,
+    max_depth: int | None,
+    as_json: bool,
+) -> None:
+    """Trace the stream network upstream of a pour point and print it as a tree."""
+    from .hydro import (
+        build_graph,
+        drop_fictif,
+        snap_pour_point,
+        to_tree,
+        trace_upstream,
+    )
+    from .hydro.network import fetch_troncons, load_troncons
+
+    if (from_file is None) == (bbox_s is None):
+        raise click.UsageError("provide exactly one of --from-file or --bbox")
+
+    try:
+        if from_file is not None:
+            gdf = load_troncons(from_file)
+        else:
+            client: WFSClient = ctx.obj["client"]
+            gdf = fetch_troncons(client, _parse_bbox(bbox_s))  # type: ignore[arg-type]
+    except (WFSError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not len(gdf):
+        raise click.ClickException("no tronçons loaded")
+
+    if point_s is not None:
+        lon, lat = (float(x) for x in point_s.split(","))
+    else:
+        minx, miny, maxx, maxy = gdf.total_bounds
+        lon, lat = (minx + maxx) / 2, (miny + maxy) / 2
+        click.echo(f"no --point; using centroid {lon:.5f},{lat:.5f}", err=True)
+
+    snap = snap_pour_point(gdf, lon, lat)
+    click.echo(
+        f"snapped to {snap['cleabs']} "
+        f"({snap['toponyme'] or 'unnamed'}, {snap['distance_m']:.0f} m away)",
+        err=True,
+    )
+
+    # Fictif edges (lake/void connectors) stay in the graph for connectivity — they
+    # often carry the main stem through a lake — and are folded out of the view below.
+    graph = build_graph(gdf)
+    edge_ids, sub = trace_upstream(graph, snap["root_node"])
+    tree = to_tree(
+        sub, snap["root_node"], collapse_chains=not no_collapse, min_order=min_order
+    )
+    if no_fictif:
+        drop_fictif(tree)
+
+    if as_json:
+        _dump(tree, None)
+        return
+
+    shown = "shown" if (min_order or no_fictif) else "total"
+    click.echo(
+        f"upstream of {snap['toponyme'] or snap['cleabs']}: "
+        f"{len(edge_ids)} edges traced; "
+        f"{tree['upstream_segments']} segments / {tree['upstream_length_m'] / 1000:.1f} km {shown}"
+        + (" (fictif hidden)" if no_fictif else "")
+    )
+    for line in _render_tree(tree, max_depth=max_depth):
+        click.echo(line)
+
+
+def _render_tree(node: dict, *, max_depth: int | None) -> list[str]:
+    """ASCII tree lines: '├── Gave de Pau  (order 4, 8.2 km, 12 seg)'."""
+    lines: list[str] = []
+
+    def label(n: dict) -> str:
+        e = n.get("edge")
+        if e is None:
+            return "● (pour point)"
+        name = e.get("toponyme") or "(unnamed)"
+        bits = []
+        if e.get("order") is not None:
+            bits.append(f"order {e['order']}")
+        length = e.get("length_m", 0.0) + n.get("collapsed_length_m", 0.0)
+        bits.append(f"{length / 1000:.1f} km")
+        seg = 1 + n.get("collapsed_segments", 0)
+        if seg > 1:
+            bits.append(f"{seg} seg")
+        if e.get("fictif"):
+            bits.append("fictif")
+        return f"{name}  ({', '.join(bits)})"
+
+    def walk(n: dict, prefix: str, is_last: bool, depth: int) -> None:
+        if depth == 0:
+            lines.append(label(n))
+        else:
+            lines.append(f"{prefix}{'└── ' if is_last else '├── '}{label(n)}")
+        if max_depth is not None and depth >= max_depth:
+            if n["children"]:
+                more = sum(c["upstream_segments"] for c in n["children"])
+                child_prefix = prefix + ("    " if is_last else "│   ")
+                lines.append(f"{child_prefix}… {len(n['children'])} branch(es), {more} seg")
+            return
+        kids = n["children"]
+        for i, child in enumerate(kids):
+            last = i == len(kids) - 1
+            child_prefix = prefix + ("" if depth == 0 else ("    " if is_last else "│   "))
+            walk(child, child_prefix, last, depth + 1)
+
+    walk(node, "", True, 0)
+    return lines
 
 
 def main() -> None:

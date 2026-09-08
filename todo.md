@@ -1,9 +1,46 @@
-# TODO — next session: `troncon_hydrographique` + upstream tree
+# TODO — `troncon_hydrographique` + upstream tree
 
 Goal: from a pour point, trace the stream network **upstream** and present it as a
 **tree view** (text/indented first, map later). This is the building block for a
 real "valley catchment", which the coarse `bassin_versant_topographique` layer
 can't give us.
+
+## DONE (this session)
+
+- `networkx>=3.0` added to core deps.
+- `src/valleespyr/hydro/network.py`: `load_troncons()` (offline GeoJSON/parquet,
+  drops Z, normalises "nan"/NA text, adds `length_m`), `fetch_troncons()` (live
+  WFS, handles the URN-CRS lat/lon axis swap), `build_graph()` → downstream-
+  pointing `nx.DiGraph` (applies `sens_de_l_ecoulement`, flags `Double sens`/
+  `Indéterminé` as `ambiguous`, drops self-loops, keeps the longest parallel edge).
+- `src/valleespyr/hydro/trace.py`: `snap_pour_point()`, `trace_upstream()` (BFS on
+  predecessors, visited-set cycle guard), `to_tree()` (nested dict, children by
+  descending upstream length, `collapse_chains`, `min_order` prune),
+  `drop_fictif()` (splice connector edges out of the printed tree, totals kept).
+- CLI `valleespyr hydro tree --from-file … --point LON,LAT [--bbox …]
+  [--min-order N] [--no-fictif] [--no-collapse] [--max-depth N] [--json]` — ASCII
+  `├──` tree + summary line.
+- Streamlit: "Upstream trace (streams)" view — pour-point text field, hide-fictif
+  + min-order toggles, traced network drawn on a pydeck map, indented tree,
+  GeoJSON download. Graph build cached per file.
+- Tests: `tests/test_hydro.py` (14, Y-network fixture + offline gavarnie sanity:
+  >200 edges, >50 km, excludes Gave de Héas) + 1 Streamlit view test. 33 total pass.
+
+Verified against the gavarnie sample: pour point `(-0.0086, 42.7350)` → 349 edges
+traced, 88.9 km; with `--no-fictif --min-order 3` → 17.5 km of Gave des Tourettes
+/ Gave de Pau source / Ruisseau de Pailla / Ruisseau du Taillon. Gave de Héas
+correctly excluded (joins downstream).
+
+## STILL OPEN / next
+
+- `sens_de_l_ecoulement` inversion is coded but untested on real data — the whole
+  gavarnie sample is `"Sens direct"`. Find a bbox with `"Sens inverse"` edges.
+- The trace can touch the bbox edge silently — warn / auto-expand the fetch.
+- Braided `Gave de Pau` sections near Gavarnie village give every node 2 upstream
+  edges, so `collapse_chains` can't fire there. Maybe collapse across a 2-cycle.
+- Click-on-map pour point in Streamlit (currently a text field).
+- Merge traced network → single MultiLineString for DEM draping.
+- Strahler recomputation from the graph (don't trust `numero_d_ordre`).
 
 ## Context recap (state at end of last session)
 

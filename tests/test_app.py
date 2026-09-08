@@ -19,6 +19,7 @@ from valleespyr.app import (  # noqa: E402
     DATA_CANDIDATES,
     deck_for,
     dissolve_by_watercourse,
+    river_name,
 )
 
 
@@ -49,6 +50,30 @@ def test_dissolve_by_watercourse_groups_and_counts():
     assert row["area_km2"] == pytest.approx(22.0)
 
 
+def test_dissolve_by_watercourse_adds_readable_name():
+    gdf = _synthetic()
+    gdf["toponyme"] = [
+        "Le Gave de Pau du confluent de l'Ouzom au confluent du Béez",
+        "La Gave de Pau de sa source au confluent du Pailla",
+        "L'Ariège du confluent de X au confluent de Y",
+    ]
+    out = dissolve_by_watercourse(gdf).set_index("liens_vers_cours_d_eau_principal")
+    assert out.loc["COURDEAU0001", "watercourse"] == "Gave de Pau"
+
+
+@pytest.mark.parametrize(
+    "toponyme, expected",
+    [
+        ("Le Gave de Pau du confluent de l'Ouzom au confluent du Béez", "Gave de Pau"),
+        ("La Gave de Pau de sa source au confluent du Pailla", "Gave de Pau"),
+        ("L'Ariège du confluent du Vicdessos au confluent du Lauze", "Ariège"),
+        ("", "(sans nom)"),
+    ],
+)
+def test_river_name(toponyme, expected):
+    assert river_name(toponyme) == expected
+
+
 def test_deck_for_builds_valid_deck_both_views():
     gdf = _synthetic()
     d1 = deck_for(gdf, {gdf.index[0]})
@@ -77,9 +102,43 @@ def test_app_runs_without_exception():
     at = AppTest.from_file(app_mod.__file__, default_timeout=60).run()
     assert not at.exception
     assert at.title[0].value.startswith("Pyrénées")
+
+    # Default view is the drill-down map (pydeck chart, no dataframe).
+    assert len(at.dataframe) == 0
+
+    view = next(r for r in at.radio if r.label == "View")
+    view.set_value("Sub-catchments").run()
+    assert not at.exception
     assert len(at.dataframe) == 1
 
     view = next(r for r in at.radio if r.label == "View")
     view.set_value("Dissolved by watercourse").run()
     assert not at.exception
     assert len(at.dataframe[0].value) < len(_synthetic()) + 10_000  # sane, dissolved is smaller
+
+
+TRONCON_SAMPLE = Path("data/raw/troncon_hydrographique_gavarnie_sample.geojson")
+
+
+@pytest.mark.skipif(
+    not (any(Path(p).exists() for p in DATA_CANDIDATES) and TRONCON_SAMPLE.exists()),
+    reason="need both the watershed dump and the gavarnie tronçon sample",
+)
+def test_upstream_trace_view_traces_from_the_default_pour_point():
+    pytest.importorskip("networkx")
+    from streamlit.testing.v1 import AppTest
+
+    import valleespyr.app as app_mod
+
+    at = AppTest.from_file(app_mod.__file__, default_timeout=120).run()
+    view = next(r for r in at.radio if r.label == "View")
+    view.set_value("Upstream trace (streams)").run()
+    assert not at.exception
+
+    assert any("Upstream of Gave de Pau" in s.value for s in at.subheader)
+    edges = next(m for m in at.metric if m.label == "Edges traced")
+    assert int(edges.value) > 200
+    # the indented tree is rendered as a text block
+    tree_text = next(t.value for t in at.text if "pour point" in t.value)
+    assert "Gave de Pau" in tree_text
+    assert "Gave de Héas" not in tree_text  # joins downstream, must not be upstream
