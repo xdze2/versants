@@ -45,7 +45,23 @@ valleespyr wfs watersheds --bbox -0.10,42.65,0.15,42.85 --srs EPSG:2154 -o data/
 
 # Fetch the watershed containing a pour point
 valleespyr wfs watersheds --point -0.0086,42.7350 -o data/raw/gavarnie_pourpoint_ws.geojson
+
+# Bulk-download a whole layer (paged). Output format from the suffix:
+#   .geojson              -> streamed GeoJSON, no extra deps
+#   .parquet / .gpkg      -> GeoParquet / GeoPackage (needs geopandas + pyarrow)
+valleespyr wfs dump -o data/raw/bassin_versant_topographique_fr.parquet          # all of France (~6.6k feats, ~1 min, 99 MB)
+valleespyr wfs dump --bbox -2.0,42.3,3.2,43.4 -o data/raw/bv_pyrenees.parquet     # Pyrénées only (~530 feats, 2 MB)
 ```
+
+### Why WFS and not the bulk file store
+
+IGN's *Service Téléchargement* (`data.geopf.fr/telechargement`) ships BD TOPO as
+per-département `.7z` archives of **every** theme (~1–2 GB each), indexed through a
+paginated Atom feed that is awkward to script (and rate-limits). The watershed
+layer alone is ~6,600 features for all of metropolitan France, so paging the WFS
+is the simpler bulk source — no archive, no unwanted themes. Use the file store
+later if you need the fine stream-topology layers (`troncon_hydrographique`,
+`cours_d_eau`).
 
 ## Layout
 
@@ -54,6 +70,7 @@ config/            per-valley config (bbox, pour point, CRS, source URLs)
 src/valleespyr/
   cli.py           click CLI  (group: `wfs`)
   watershed.py     fetch / select topographic watersheds
+  dump.py          bulk-download a whole layer (paged) to GeoJSON/GeoParquet/GPKG
   sources/wfs.py   minimal OGC WFS 2.0 client
 data/raw|processed getignored working data
 tests/             offline unit tests

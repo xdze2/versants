@@ -8,6 +8,7 @@ import sys
 import click
 
 from . import watershed as ws
+from .dump import dump_layer
 from .sources.wfs import GEOPLATEFORME_WFS, LAYER_BASSIN_VERSANT, WFSClient, WFSError
 
 BBOX_HELP = "Bounding box as 'minx,miny,maxx,maxy' (lon/lat WGS84 unless --bbox-crs given)."
@@ -150,6 +151,63 @@ def wfs_watersheds(
     n = len(fc.get("features", []))
     click.echo(f"{n} feature(s)", err=True)
     _dump(fc, output)
+
+
+@wfs.command("dump")
+@click.option("--layer", default=LAYER_BASSIN_VERSANT, show_default=True)
+@click.option("--bbox", "bbox_s", default=None, help=BBOX_HELP)
+@click.option("--bbox-crs", default="EPSG:4326", show_default=True)
+@click.option("--cql", default=None, help="CQL filter (mutually exclusive with --bbox).")
+@click.option("--srs", default="EPSG:4326", show_default=True, help="Output CRS (e.g. EPSG:2154).")
+@click.option("--page-size", default=1000, show_default=True, help="Features per WFS request.")
+@click.option("--max-features", type=int, default=None, help="Stop after this many features.")
+@click.option(
+    "-o",
+    "--output",
+    required=True,
+    help="Destination file. Suffix picks the format: .parquet/.gpkg (needs geopandas) or .geojson.",
+)
+@click.pass_context
+def wfs_dump(
+    ctx: click.Context,
+    layer: str,
+    bbox_s: str | None,
+    bbox_crs: str,
+    cql: str | None,
+    srs: str,
+    page_size: int,
+    max_features: int | None,
+    output: str,
+) -> None:
+    """Bulk-download a whole layer (paged) to GeoJSON / GeoParquet / GeoPackage.
+
+    With no --bbox and no --cql, downloads the entire layer. The watershed layer
+    is ~6.6k features for all of metropolitan France, so that is quick.
+    """
+    client: WFSClient = ctx.obj["client"]
+    if bbox_s is not None and cql is not None:
+        raise click.UsageError("provide at most one of --bbox or --cql")
+    bbox = _parse_bbox(bbox_s) if bbox_s else None
+
+    def _progress(n: int, total: int | None) -> None:
+        click.echo(f"  {n}{f' / {total}' if total else ''} features", err=True)
+
+    try:
+        count = dump_layer(
+            client,
+            layer,
+            output,
+            bbox=bbox,
+            bbox_crs=bbox_crs,
+            cql_filter=cql,
+            srs_name=srs,
+            page_size=page_size,
+            max_features=max_features,
+            progress=_progress,
+        )
+    except (WFSError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"wrote {count} features to {output}", err=True)
 
 
 def main() -> None:
