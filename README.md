@@ -21,6 +21,59 @@ WFS**.
 The WFS endpoint and layer name are configurable (`--wfs-endpoint`, `--layer`) so
 the same tooling points at Sandre or a different dataset.
 
+### What the two hydrographic layers actually contain
+
+Both come from IGN BD TOPO v3 and share the same `cours_d_eau` ("watercourse")
+identifiers, which is what lets us join them.
+
+**`troncon_hydrographique` — river segments.** The stream network as lines. A
+tronçon is *not* one reach between two confluences: the layer splits wherever any
+attribute changes (nature, width class, administrative limits) as well as at
+junctions, so segments are short — median **210 m**, and a single named river can
+be made of dozens of them (up to 84 in the Gavarnie sample). Confluences *are*
+always splits, though: 1039 of the 1042 junction nodes in the sample both end one
+tronçon and start another. Rolling these up into whole rivers is what
+`hydro/rivers.py` does.
+
+| Attribute | Why we use it |
+|---|---|
+| `cleabs` | Stable segment id; the key the map picks features by |
+| `lien_vers_noeud_hydrographique_ini` / `_fin` | Start/end node — these build the graph |
+| `sens_de_l_ecoulement` | Flow direction. `Sens inverse` means the drawn geometry points *upstream* and the two nodes must be swapped; `Double sens` (tidal/canal) is ambiguous |
+| `liens_vers_cours_d_eau` | The watercourse a segment belongs to — the roll-up key from segments to rivers |
+| `cpx_toponyme_de_cours_d_eau` | River name (only ~38% of segments carry one) |
+| `numero_d_ordre` | Strahler order, 1–7 here. Drives line width on the map |
+| `nature` | `Ecoulement naturel` vs `Canal`, `Conduit forcé`, `Retenue`, `Lac`… — lets us keep natural flow only |
+| `fictif` | Virtual link drawn through a lake or braided reach to keep the network connected |
+| `reseau_principal_coulant` | Marks the main flowing network, as opposed to side arms |
+
+**`bassin_versant_topographique` — sub-catchments.** Polygons that tile the
+drainage area, one per *reach* of a watercourse rather than per whole river: the
+`toponyme` reads like "Le Gave de Pau du confluent de l'Ouzom au confluent du
+Béez" — from one confluence to the next. So the atomic-area-between-junctions
+idea is right for the polygons, and each is keyed to the watercourse it drains
+via `liens_vers_cours_d_eau_principal`. They are coarse (median **49 km²**,
+derived from BD Carthage at 20 m planimetric precision) and cover far fewer
+watercourses than the tronçon layer does — in the Gavarnie sample only 10 of 367
+rivers get a polygon at all.
+
+The union of the sub-basins keyed to a river *and every river upstream of it* is
+that river's catchment area (`watershed.catchment_polygon`). That is a real
+drainage area, not a hull drawn around the stream lines.
+
+| Attribute | Why we use it |
+|---|---|
+| `liens_vers_cours_d_eau_principal` | The watercourse this sub-basin drains — the join key to the tronçon layer |
+| `cleabs` | Stable polygon id |
+| `toponyme` | Human-readable reach description ("from confluence X to confluence Y") |
+| `code_bdcarthage` / `code_hydrographique` | BD Carthage codes, for cross-referencing other datasets |
+
+One caveat worth knowing: a sub-basin is keyed to a *whole* watercourse, so
+dissolving them gives the catchment over that watercourse's full length —
+including reaches downstream of whatever bbox the tronçon dump was clipped to.
+That is correct for a river whose outlet sits inside the dump, and over-reaches
+for one the dump cuts off mid-course.
+
 ## Install
 
 ```bash
