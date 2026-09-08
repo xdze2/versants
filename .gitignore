@@ -1,0 +1,24 @@
+# data
+/data/raw/*
+/data/processed/*
+!/data/raw/.gitkeep
+!/data/processed/.gitkeep
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# notebooks
+.ipynb_checkpoints/
+
+# os / editor
+.DS_Store
+.vscode/
