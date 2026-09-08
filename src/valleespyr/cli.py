@@ -318,6 +318,162 @@ def hydro_tree(
         click.echo(line)
 
 
+def _load_troncons_gdf(ctx: click.Context, from_file: str | None, bbox_s: str | None):
+    """Shared loader for the hydro commands: local file or a live WFS bbox."""
+    from .hydro.network import fetch_troncons, load_troncons
+
+    if (from_file is None) == (bbox_s is None):
+        raise click.UsageError("provide exactly one of --from-file or --bbox")
+    try:
+        if from_file is not None:
+            gdf = load_troncons(from_file)
+        else:
+            client: WFSClient = ctx.obj["client"]
+            gdf = fetch_troncons(client, _parse_bbox(bbox_s))  # type: ignore[arg-type]
+    except (WFSError, OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not len(gdf):
+        raise click.ClickException("no tronçons loaded")
+    return gdf
+
+
+@hydro.group("rivers")
+def hydro_rivers() -> None:
+    """Roll the tronçon network up into a browsable river graph."""
+
+
+@hydro_rivers.command("list")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option("--named-only", is_flag=True, help="Only rivers that carry a toponyme.")
+@click.option("--roots", "roots_only", is_flag=True, help="Only rivers with no river downstream.")
+@click.option("--min-length-km", type=float, default=0.0, help="Hide rivers shorter than this.")
+@click.option("-n", "--limit", type=int, default=40, show_default=True, help="Max rows (0 = all).")
+@click.option("--json", "as_json", is_flag=True, help="Emit the summary rows as JSON.")
+@click.pass_context
+def rivers_list(
+    ctx: click.Context,
+    from_file: str | None,
+    bbox_s: str | None,
+    named_only: bool,
+    roots_only: bool,
+    min_length_km: float,
+    limit: int,
+    as_json: bool,
+) -> None:
+    """List the rivers found in the loaded network, longest first."""
+    from .hydro import build_graph, build_river_network
+
+    gdf = _load_troncons_gdf(ctx, from_file, bbox_s)
+    rn = build_river_network(build_graph(gdf))
+
+    rows = rn.summary()
+    if named_only:
+        rows = [r for r in rows if r["name"]]
+    if roots_only:
+        rows = [r for r in rows if r["is_root"]]
+    if min_length_km:
+        rows = [r for r in rows if r["length_km"] >= min_length_km]
+    if limit:
+        rows = rows[:limit]
+
+    if as_json:
+        _dump(rows, None)
+        return
+
+    click.echo(
+        f"{len(rn)} rivers "
+        f"({sum(1 for x in rn if x.name)} named, {len(rn.roots())} roots, "
+        f"{len(rn.leaves())} leaves); {rn.graph.number_of_edges()} 'flows into' links",
+        err=True,
+    )
+    click.echo(f"{'length':>9}  {'ord':>3}  {'seg':>4}  {'R/L':>3}  {'trib':>4}  name / id")
+    for r in rows:
+        flag = ("R" if r["is_root"] else " ") + ("L" if r["is_leaf"] else " ")
+        click.echo(
+            f"{r['length_km']:>7.1f}km  {str(r['max_order'] or ''):>3}  "
+            f"{r['n_segments']:>4}  {flag:>3}  {r['n_children']:>4}  {r['name'] or r['id']}"
+        )
+
+
+@hydro_rivers.command("show")
+@click.argument("query")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option(
+    "--geojson",
+    type=click.Choice(["path", "catchment"]),
+    default=None,
+    help="Emit GeoJSON instead of the report: the river's own lines, or its whole catchment.",
+)
+@click.option("-o", "--output", default=None, help="Write output here instead of stdout.")
+@click.pass_context
+def rivers_show(
+    ctx: click.Context,
+    query: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    geojson: str | None,
+    output: str | None,
+) -> None:
+    """Inspect one river: parent, tributaries, catchment rivers, root/leaf state.
+
+    QUERY is a river name (case-insensitive substring) or a ``COURDEAU…`` id.
+    """
+    from .hydro import build_graph, build_river_network
+
+    gdf = _load_troncons_gdf(ctx, from_file, bbox_s)
+    rn = build_river_network(build_graph(gdf))
+
+    river = rn.get(query)
+    if river is None:
+        matches = rn.by_name(query)
+        if not matches:
+            raise click.ClickException(f"no river matching {query!r}")
+        if len(matches) > 1:
+            click.echo(f"{len(matches)} rivers match {query!r}:", err=True)
+            for m in sorted(matches, key=lambda r: r.length_m, reverse=True):
+                click.echo(f"  {m.length_m / 1000:6.1f} km  {m.name}  [{m.id}]", err=True)
+            raise click.ClickException("be more specific or pass the id")
+        river = matches[0]
+
+    if geojson is not None:
+        fc = (
+            rn.river_path_geojson(river.id)
+            if geojson == "path"
+            else rn.river_catchment_geojson(river.id)
+        )
+        click.echo(f"{len(fc['features'])} line feature(s)", err=True)
+        _dump(fc, output)
+        return
+
+    parent = rn.parent(river.id)
+    kids = rn.children(river.id)
+    catchment = rn.upstream_rivers(river.id, named_only=True)
+    state = "root" if river.is_root else "leaf" if river.is_leaf else "interior"
+    downstream = (parent.name or parent.id) if parent else "— (drains out of the loaded network)"
+
+    lines = [
+        f"{river.name or '(unnamed)'}   [{river.id}]",
+        f"  state        : {state}  (root={river.is_root}, leaf={river.is_leaf})",
+        f"  length       : {river.length_m / 1000:.1f} km over {len(river.segments)} tronçons",
+        f"  Strahler     : {river.max_order}",
+        f"  outlet node  : {river.outlet}",
+        f"  downstream   : {downstream}",
+        f"  direct tribs : {len(kids)}",
+    ]
+    for c in kids[:20]:
+        lines.append(f"      {c.length_m / 1000:6.1f} km  {c.name or c.id}")
+    if len(kids) > 20:
+        lines.append(f"      … {len(kids) - 20} more")
+    lines.append(f"  catchment rivers (named, recursive): {len(catchment)}")
+    for c in catchment[:25]:
+        lines.append(f"      {c.length_m / 1000:6.1f} km  {c.name}")
+    if len(catchment) > 25:
+        lines.append(f"      … {len(catchment) - 25} more")
+    click.echo("\n".join(lines))
+
+
 def _render_tree(node: dict, *, max_depth: int | None) -> list[str]:
     """ASCII tree lines: '├── Gave de Pau  (order 4, 8.2 km, 12 seg)'."""
     lines: list[str] = []

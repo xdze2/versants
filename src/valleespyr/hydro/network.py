@@ -44,6 +44,9 @@ TOPONYME = "cpx_toponyme_de_cours_d_eau"
 NATURE = "nature"
 FICTIF = "fictif"
 MAIN_NET = "reseau_principal_coulant"
+# Stable ``cours_d_eau`` id (may be several ``/``-joined); used to roll segments
+# up into rivers (see ``hydro/rivers.py``).
+COURS_D_EAU = "liens_vers_cours_d_eau"
 
 # ``sens_de_l_ecoulement`` values -> what to do with the drawn geometry.
 FLOW_DIRECT = "Sens direct"  # geometry already points downstream
@@ -167,6 +170,7 @@ def build_graph(gdf: gpd.GeoDataFrame) -> nx.DiGraph:
             "nature": d.get(NATURE),
             "fictif": bool(d.get(FICTIF)),
             "main_network": bool(d.get(MAIN_NET)) if d.get(MAIN_NET) is not None else None,
+            COURS_D_EAU: d.get(COURS_D_EAU),
             "length_m": float(d.get("length_m") or 0.0),
             "flow": flow,
             "ambiguous": ambiguous,

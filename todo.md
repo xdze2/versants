@@ -31,7 +31,59 @@ traced, 88.9 km; with `--no-fictif --min-order 3` → 17.5 km of Gave des Touret
 / Gave de Pau source / Ruisseau de Pailla / Ruisseau du Taillon. Gave de Héas
 correctly excluded (joins downstream).
 
+## DONE (river-graph session)
+
+- `src/valleespyr/hydro/rivers.py`: `build_river_network(troncon_digraph)` →
+  `RiverNetwork`. Rolls tronçons up by `liens_vers_cours_d_eau` (first id of a
+  `/`-joined list); unnamed reaches merge downstream into the first named river.
+  Each `River`: id, name (most-common toponyme), segments, nodes, outlet,
+  source_nodes, length_m, max_order, parent_id, child_ids, is_root/is_leaf.
+  `RiverNetwork`: `by_name`, `roots`, `leaves`, `parent`, `children`,
+  `upstream_rivers(named_only=)`, `downstream_path`, `summary`,
+  `river_path_geojson`, `river_catchment_geojson`.
+- `build_graph` now also carries `liens_vers_cours_d_eau` onto edges.
+- Cycle guard: BD TOPO over-splits some watercourses into `cours_d_eau` records
+  that point at each other at the confluence → `_merge_cycles` contracts each
+  SCC>1 into its longest member so the river graph stays a DAG.
+- CLI `valleespyr hydro rivers list` (--named-only/--roots/--min-length-km/-n/
+  --json) and `... rivers show QUERY` (name substring or COURDEAU id; disambiguates
+  on multiple matches; `--geojson path|catchment -o`).
+- `tests/test_rivers.py` (12: hand-built Main/Trib/unnamed-reach fixture +
+  offline gavarnie roll-up sanity). 44 total pass.
+
+Verified on the gavarnie sample: 370 rivers, DAG, Gave de Pau is the root
+(order 7), gaves de Héas / d'Estaubé / d'Ossoue / d'Aspé in its catchment;
+la Neste and Gave de Lutour are separate roots (outlets leave the sample bbox).
+
 ## STILL OPEN / next
+
+- **Bulk-dump `troncon_hydrographique` for the whole Pyrénées** (`wfs dump`,
+  bbox ~ `-2.0,42.3,3.2,43.4`) so the river graph closes — Lutour/Neste/etc.
+  attach to the Adour / Garonne trunks instead of being false roots.
+- **Real catchment polygons.** `river_catchment_geojson` currently returns the
+  upstream *line network*, not an area. Options: (a) dissolve intersecting
+  `bassin_versant_topographique` polygons (data already downloaded), (b) DEM
+  delineation from the outlet node (`pysheds`/WhiteboxTools, the `dem` extra).
+  Ship (a) first.
+- ~~Streamlit: a "Rivers" page~~ — DONE: `app.py` rewritten from scratch as a
+  river-graph navigator (sidebar picker / root-basin landing table → course +
+  catchment pydeck map → tributary list + catchment-tree text → click a reach
+  or row to drill in → breadcrumb / "↓ downstream" to walk back). `RiverNetwork`
+  cached per dump via `@st.cache_resource`. `tests/test_app.py` rewritten.
+- **`build_river_network` was nondeterministic under `PYTHONHASHSEED`** (river
+  count varied 367–370, catchment membership flipped). Fixed: every downstream
+  tie-break / SCC-merge / graph-edge pass now sorts. Also switched the river
+  graph to connect *every* outflow node of a river (not one chosen `outlet`),
+  which fixed the Gave d'Ossoue showing as a false root.
+- A multi-outflow river now can have >1 parent in the river graph; `parent_id`
+  / `downstream_path` follow the first sorted one. Revisit if it matters.
+- The 0.3 km "Gave d'Ossoue" second `cours_d_eau` record (and similar short
+  stubs) still list as tributaries of the main course. Decide: merge same-name
+  parent/child within a short distance, or leave as data quirk.
+- `RiverNetwork` persistence: building it for the whole Pyrénées every CLI call
+  is wasteful — pickle/parquet the rolled-up graph.
+
+## (earlier) STILL OPEN / next
 
 - `sens_de_l_ecoulement` inversion is coded but untested on real data — the whole
   gavarnie sample is `"Sens direct"`. Find a bbox with `"Sens inverse"` edges.

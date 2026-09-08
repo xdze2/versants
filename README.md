@@ -60,15 +60,20 @@ pip install -e ".[app]"
 streamlit run src/valleespyr/app.py      # or: valleespyr-app
 ```
 
-The Streamlit explorer reads the local dump (falls back to a live WFS bbox
-fetch if none is found) and lets you:
+The Streamlit app is a **river-graph navigator**. Point it at a local
+`troncon_hydrographique` dump (see `wfs dump`); it rolls the segments up into
+whole rivers and lets you:
 
-- pan/zoom a pydeck map of the watershed polygons
-- filter by basin district, toponyme substring, and area
-- switch between **sub-catchments** and **dissolved by watercourse**
-  (`liens_vers_cours_d_eau_principal` — one polygon per whole named river)
-- select rows in the table to highlight them on the map
-- download the current selection as GeoJSON / GeoParquet / CSV
+- pick a river from the sidebar (name search / roots-only), or a root basin
+  from the landing table
+- see its **course** (orange) and its whole **catchment** stream network
+  (blue) on a pydeck map, with its length, Strahler order and root/leaf state
+- read its **tributaries** biggest-first and its **catchment tree** as text;
+  click a blue reach on the map or a row in the tributary list, then **enter**
+  it to drop into that sub-valley
+- walk back down via the breadcrumb (outlet ▸ … ▸ current) or the
+  "↓ downstream" button
+- download the current river's course or catchment as GeoJSON
 
 ### Why WFS and not the bulk file store
 
@@ -80,16 +85,45 @@ is the simpler bulk source — no archive, no unwanted themes. Use the file stor
 later if you need the fine stream-topology layers (`troncon_hydrographique`,
 `cours_d_eau`).
 
+### Rivers: browse the network as a tree of watercourses
+
+`hydro rivers` rolls the fine `troncon_hydrographique` segments up into whole
+**rivers** (keyed by BD TOPO's `cours_d_eau` id) and connects them into a
+"flows into" DAG. From that you get, per river: its Strahler order, total
+length, the **rivers in its catchment** (recursive), its **parent** (the river
+downstream), and **root / leaf** state.
+
+```bash
+# List the rivers in a loaded network, longest first
+valleespyr hydro rivers list --from-file data/raw/troncon_hydrographique_gavarnie_sample.geojson \
+    --named-only --min-length-km 3
+
+# Inspect one river: downstream river, tributaries, catchment, root/leaf
+valleespyr hydro rivers show "Gave d'Ossoue" --from-file data/raw/troncon_hydrographique_gavarnie_sample.geojson
+
+# Its own path, or its whole catchment stream network, as GeoJSON
+valleespyr hydro rivers show "Gave de Héas" --from-file … --geojson path      -o heas.geojson
+valleespyr hydro rivers show "Gave de Héas" --from-file … --geojson catchment -o heas_catchment.geojson
+```
+
+`--bbox` fetches tronçons live instead of reading a file. A river whose outlet
+leaves the loaded extent shows up as a *root*; dump a wider area (see
+`wfs dump`) to attach it to the network below.
+
 ## Layout
 
 ```
 config/            per-valley config (bbox, pour point, CRS, source URLs)
 src/valleespyr/
-  cli.py           click CLI  (group: `wfs`)
+  cli.py           click CLI  (groups: `wfs`, `hydro`)
   watershed.py     fetch / select topographic watersheds
   dump.py          bulk-download a whole layer (paged) to GeoJSON/GeoParquet/GPKG
-  app.py           Streamlit explorer (map + table + filters + downloads)
+  app.py           Streamlit river-graph navigator (course + catchment map, drilldown)
   sources/wfs.py   minimal OGC WFS 2.0 client
+  hydro/
+    network.py     load troncon_hydrographique -> downstream-pointing DiGraph
+    trace.py       snap a pour point, trace upstream, shape it as a tree
+    rivers.py      roll segments up into a river graph (list / catchment / parent)
 data/raw|processed getignored working data
 tests/             offline unit tests
 ```
