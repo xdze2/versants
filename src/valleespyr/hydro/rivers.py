@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import networkx as nx
 
-from .trace import trace_upstream
 
 # Sentinel river id prefix for a maximal run of unnamed reaches that never
 # reaches a named river before leaving the loaded network.
@@ -182,18 +181,32 @@ class RiverNetwork:
             self._troncons, self._segment_edges(river_id), river=self.rivers.get(river_id)
         )
 
-    def river_catchment_geojson(self, river_id: str) -> dict[str, Any]:
-        """Coarse catchment: every tronçon upstream of the river's outlet.
+    def catchment_segments(self, river_id: str) -> set[str]:
+        """``cleabs`` of every tronçon in ``river_id``'s catchment.
 
-        This is the *stream network* of the catchment, not a filled polygon —
-        dissolve it against DEM- or ``bassin_versant_topographique``-derived
-        polygons for an actual area. Returned as a line ``FeatureCollection``.
+        That is the river's own segments plus those of every river upstream of it
+        in the river graph — **not** an upstream trace from the outlet node,
+        which would also pull in the parent river's other branches past the
+        confluence.
         """
         r = self.rivers.get(river_id)
-        if r is None or r.outlet is None:
+        if r is None:
+            return set()
+        out = set(r.segments)
+        for up in self.upstream_rivers(river_id):
+            out |= up.segments
+        return out
+
+    def river_catchment_geojson(self, river_id: str) -> dict[str, Any]:
+        """The catchment's *stream network* as a line ``FeatureCollection``.
+
+        Not a filled polygon — dissolve it against DEM- or
+        ``bassin_versant_topographique``-derived polygons for an actual area.
+        """
+        r = self.rivers.get(river_id)
+        if r is None:
             return {"type": "FeatureCollection", "features": []}
-        edge_ids, _ = trace_upstream(self._troncons, r.outlet)
-        return _segments_geojson(self._troncons, edge_ids, river=r)
+        return _segments_geojson(self._troncons, self.catchment_segments(river_id), river=r)
 
     # ----------------------------------------------------------------- internals
 

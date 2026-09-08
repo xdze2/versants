@@ -157,6 +157,19 @@ def test_river_catchment_geojson_includes_upstream_tribs(rn):
     assert ids == {"MAIN_1", "MAIN_2a", "MAIN_2b", "TRIB_1", "UNN_1"}
 
 
+def test_catchment_of_a_tributary_is_only_itself_and_its_upstream(rn):
+    """A tributary's catchment must NOT include the trunk it flows into.
+
+    Regression: it used to trace upstream from the river's outlet node, which is
+    the confluence with the trunk, so it wrongly pulled in the trunk's headwaters.
+    """
+    trib = rn.by_name("Trib", exact=True)[0]
+    ids = rn.catchment_segments(trib.id)
+    assert ids == {"TRIB_1", "UNN_1"}  # Trib + its merged unnamed reach, nothing of Main
+    assert rn.upstream_rivers(trib.id) == []  # a leaf: catchment == own segments
+    assert ids == set(trib.segments)
+
+
 def test_summary_rows_sorted_longest_first(rn):
     rows = rn.summary()
     lengths = [r["length_km"] for r in rows]

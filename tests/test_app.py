@@ -18,6 +18,7 @@ from shapely.geometry import LineString  # noqa: E402
 
 from valleespyr.app import (  # noqa: E402
     TRONCON_CANDIDATES,
+    _catchment_area_feature,
     _catchment_tree_lines,
     _fc_bounds,
     river_deck,
@@ -98,6 +99,48 @@ def test_river_deck_builds_and_colours_the_picked_tributary(rn):
     other = [f for f in feats if f["properties"]["river_id"] != trib.id]
     assert picked and all(f["properties"]["color"][0] == 255 for f in picked)
     assert all(f["properties"]["color"] != picked[0]["properties"]["color"] for f in other)
+
+
+def test_catchment_area_feature_none_without_a_polygon():
+    assert _catchment_area_feature(None) is None
+    from shapely.geometry import Polygon
+
+    assert _catchment_area_feature(Polygon()) is None  # empty geom
+
+
+def test_catchment_area_feature_wraps_a_polygon():
+    from shapely.geometry import Polygon
+
+    poly = Polygon([(0, 42), (0.1, 42), (0.1, 42.1), (0, 42.1)])
+    feat = _catchment_area_feature(poly)
+    assert feat["type"] == "Feature"
+    assert feat["geometry"]["type"] == "Polygon"
+
+
+def test_river_deck_draws_the_catchment_area_polygon_when_given_one():
+    from shapely.geometry import Polygon
+
+    poly = Polygon([(0, 42), (0.2, 42), (0.2, 42.2), (0, 42.2)])
+    fc_lines = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "properties": {"cleabs": f"C{i}", "toponyme": "x", "order": 2},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[i * 0.02, 42.0], [i * 0.02 + 0.01, 42.1]],
+                },
+            }
+            for i in range(6)
+        ],
+    }
+    bare = river_deck({"type": "FeatureCollection", "features": []}, fc_lines)
+    assert "catchment_area" not in {layer.id for layer in bare.layers}  # no polygon -> no wash
+
+    deck = river_deck(
+        {"type": "FeatureCollection", "features": []}, fc_lines, catchment_area=poly
+    )
+    assert "catchment_area" in {layer.id for layer in deck.layers}
 
 
 def test_catchment_tree_lines_nest_children_biggest_first(rn):

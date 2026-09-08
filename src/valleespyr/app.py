@@ -1,21 +1,14 @@
-"""Streamlit navigator for the Pyrénées **river graph**.
+"""Streamlit navigator for the Pyrénées river graph.
 
 Run it with::
 
-    streamlit run src/valleespyr/app.py
-    # or, after `pip install -e '.[app]'`:
-    valleespyr-app
+    streamlit run src/valleespyr/app.py   # or: valleespyr-app
 
-It loads a local ``troncon_hydrographique`` dump (see ``valleespyr wfs dump``),
-rolls the segments up into whole rivers (:func:`valleespyr.hydro.rivers.build_river_network`)
-and lets you walk the "flows into" graph:
-
-* pick a river — its **own course** and its whole **catchment** stream network
-  are drawn on the map, its facts (Strahler order, length, root/leaf state) up
-  top;
-* its **tributaries** are listed biggest-first — click one to drop into that
-  sub-valley, and a breadcrumb walks you back down to the outlet;
-* export the current river's course or catchment as GeoJSON.
+Loads a local ``troncon_hydrographique`` dump (``valleespyr wfs dump``), rolls the
+segments up into whole rivers and lets you walk the "flows into" graph: pick a
+river to map its course and catchment, click through its tributaries, export
+either as GeoJSON. A ``bassin_versant_topographique`` dump alongside adds the
+real drainage-area polygon.
 
 Everything after the initial load is graph work on the in-memory
 ``RiverNetwork`` — no further network calls. The graph is cached per dump file.
@@ -24,12 +17,12 @@ Everything after the initial load is graph work on the in-memory
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import pandas as pd
 import pydeck as pdk
 import streamlit as st
+from pydeck.data_utils import compute_view
 
 from valleespyr.hydro.rivers import RiverNetwork, build_river_network
 
@@ -38,19 +31,31 @@ TRONCON_CANDIDATES = [
     Path("data/raw/troncon_hydrographique_pyrenees.parquet"),
     Path("data/raw/troncon_hydrographique_gavarnie_sample.geojson"),
 ]
+# Topographic sub-basin dumps for the real catchment-area polygon, optional.
+BASSIN_CANDIDATES = [
+    Path("data/raw/bassin_versant_topographique_pyrenees.parquet"),
+    Path("data/raw/bassin_versant_topographique_fr.parquet"),
+]
 # Pyrénées chain, lon/lat — shown in the "dump it yourself" hint.
 PYRENEES_BBOX = (-2.0, 42.3, 3.2, 43.4)
 
 COURSE_COLOR = [255, 90, 0, 235]  # the selected river itself
-TRIB_COLOR = [70, 130, 180, 150]  # everything else in its catchment
-PICKED_TRIB_COLOR = [255, 190, 60, 230]  # a tributary hovered/selected in the list
+TRIB_COLOR = [70, 130, 180, 220]  # everything else in its catchment
+PICKED_TRIB_COLOR = [255, 190, 60, 240]  # a tributary hovered/selected in the list
+AREA_FILL = [90, 150, 200, 55]  # translucent catchment-area wash (real sub-basin union)
+AREA_LINE = [60, 110, 160, 190]  # its outline
 
 
 # --------------------------------------------------------------------------- data
 
+# Part of the cache key (a plain name, not `_version` — Streamlit excludes
+# leading-underscore args from hashing). Bump it when the roll-up / catchment
+# logic changes so a running server drops its cached RiverNetwork.
+_GRAPH_CACHE_VERSION = 2
+
 
 @st.cache_resource(show_spinner="Building river graph…")
-def load_network(path_str: str) -> RiverNetwork:
+def load_network(path_str: str, version: int = _GRAPH_CACHE_VERSION) -> RiverNetwork:
     """Load a tronçon dump and roll it up into a :class:`RiverNetwork` (cached per file)."""
     from valleespyr.hydro.network import build_graph, load_troncons
 
@@ -59,26 +64,50 @@ def load_network(path_str: str) -> RiverNetwork:
 
 
 @st.cache_data(show_spinner=False)
-def summary_frame(path_str: str) -> pd.DataFrame:
+def summary_frame(path_str: str, version: int = _GRAPH_CACHE_VERSION) -> pd.DataFrame:
     """One row per river for the picker / table (longest first)."""
     rn = load_network(path_str)
     return pd.DataFrame(rn.summary())
 
 
+@st.cache_resource(show_spinner="Loading sub-basins…")
+def load_bassins_cached(path_str: str):
+    """Local ``bassin_versant_topographique`` dump for the catchment-area polygon."""
+    from valleespyr.watershed import load_bassins
+
+    return load_bassins(path_str)
+
+
+@st.cache_data(show_spinner=False)
+def _catchment_area(rn_key: str, river_id: str, bassins_path: str | None):
+    """(polygon, area_km2, n_sub_basins) for a river's catchment, or (None, 0, 0).
+
+    Dissolves the ``bassin_versant_topographique`` sub-basins whose principal
+    watercourse is this river or any river upstream of it. ``rn_key`` is the
+    tronçon dump path — it keys the cache to the same graph the rest of the app
+    is showing.
+    """
+    if not bassins_path:
+        return None, 0.0, 0
+    import geopandas as gpd
+
+    from valleespyr.watershed import BASSIN_COURS_D_EAU, catchment_polygon
+
+    rn = load_network(rn_key)
+    river = rn.get(river_id)
+    if river is None:
+        return None, 0.0, 0
+    ids = {river.id} | {r.id for r in rn.upstream_rivers(river.id)}
+    bassins = load_bassins_cached(bassins_path)
+    poly = catchment_polygon(bassins, ids)
+    if poly is None:
+        return None, 0.0, 0
+    n = int(bassins[BASSIN_COURS_D_EAU].isin(ids).sum())
+    area_km2 = gpd.GeoSeries([poly], crs="EPSG:4326").to_crs("EPSG:2154").area.iloc[0] / 1e6
+    return poly, area_km2, n
+
+
 # ---------------------------------------------------------------------------- map
-
-
-def _zoom_for_bounds(minx: float, miny: float, maxx: float, maxy: float) -> float:
-    """Rough web-mercator zoom that fits a lon/lat box (assumes a ~900px map)."""
-    span = max(maxx - minx, (maxy - miny) * 1.6, 1e-4)
-    return max(3.0, min(13.5, math.log2(360.0 / span) + 0.2))
-
-
-def _pad(box: tuple[float, float, float, float], frac: float = 0.12):
-    minx, miny, maxx, maxy = box
-    dx = (maxx - minx) * frac or 0.01
-    dy = (maxy - miny) * frac or 0.01
-    return (minx - dx, miny - dy, maxx + dx, maxy + dy)
 
 
 def _fc_bounds(fc: dict) -> tuple[float, float, float, float] | None:
@@ -102,23 +131,60 @@ def _fc_bounds(fc: dict) -> tuple[float, float, float, float] | None:
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _catchment_area_feature(polygon) -> dict | None:
+    """Wrap a dissolved catchment polygon (shapely) as a GeoJSON ``Feature``.
+
+    ``None`` when there is no polygon: no sub-basin dump loaded, or none of the
+    catchment's watercourses appears in it.
+    """
+    if polygon is None or polygon.is_empty:
+        return None
+    from shapely.geometry import mapping
+
+    return {"type": "Feature", "geometry": mapping(polygon), "properties": {}}
+
+
 def river_deck(
     course_fc: dict,
     catchment_fc: dict,
     *,
     picked_river_id: str | None = None,
     segment_to_river: dict[str, str] | None = None,
+    catchment_area=None,
 ) -> pdk.Deck:
-    """Two line layers: the catchment network (pickable) under the selected course.
+    """Catchment area wash + stream network (pickable) under the selected course.
 
-    Each catchment feature carries ``river_id`` (looked up from its ``cleabs``)
-    so a click can resolve to a river to drill into.
+    Layers, bottom to top: the real catchment-area polygon (dissolved
+    ``bassin_versant_topographique`` sub-basins, passed in as ``catchment_area``
+    — a shapely geometry or ``None``), the catchment stream lines (width scaled
+    by Strahler order), then the selected river's own course. Each catchment
+    feature carries ``river_id`` (looked up from its ``cleabs``) so a click can
+    resolve to a river.
     """
     s2r = segment_to_river or {}
+    layers: list[pdk.Layer] = []
+
+    area = _catchment_area_feature(catchment_area)
+    if area is not None:
+        layers.append(
+            pdk.Layer(
+                "GeoJsonLayer",
+                {"type": "FeatureCollection", "features": [area]},
+                id="catchment_area",
+                stroked=True,
+                filled=True,
+                get_fill_color=AREA_FILL,
+                get_line_color=AREA_LINE,
+                line_width_min_pixels=1.5,
+                pickable=False,
+            )
+        )
+
     cat_feats = []
     for feat in catchment_fc["features"]:
         cid = feat["properties"].get("cleabs")
         rid = s2r.get(cid)
+        order = feat["properties"].get("order") or 1
         color = PICKED_TRIB_COLOR if (rid and rid == picked_river_id) else TRIB_COLOR
         cat_feats.append(
             {
@@ -128,43 +194,60 @@ def river_deck(
                     "cleabs": cid,
                     "river_id": rid or "",
                     "toponyme": feat["properties"].get("toponyme") or "",
-                    "order": feat["properties"].get("order"),
+                    "order": order,
                     "color": color,
+                    # thicker trunks, thin headwaters
+                    "width": 1.0 + 0.9 * float(order),
                 },
             }
         )
-    catchment_layer = pdk.Layer(
-        "GeoJsonLayer",
-        {"type": "FeatureCollection", "features": cat_feats},
-        id="catchment",
-        stroked=True,
-        filled=False,
-        get_line_color="properties.color",
-        line_width_min_pixels=1.0,
-        pickable=True,
-        auto_highlight=True,
+    layers.append(
+        pdk.Layer(
+            "GeoJsonLayer",
+            {"type": "FeatureCollection", "features": cat_feats},
+            id="catchment",
+            stroked=True,
+            filled=False,
+            get_line_color="properties.color",
+            get_line_width="properties.width",
+            line_width_units="pixels",
+            line_width_min_pixels=1.2,
+            pickable=True,
+            auto_highlight=True,
+        )
     )
-    course_layer = pdk.Layer(
-        "GeoJsonLayer",
-        course_fc,
-        id="course",
-        stroked=True,
-        filled=False,
-        get_line_color=COURSE_COLOR,
-        line_width_min_pixels=3.0,
-        pickable=False,
+    layers.append(
+        pdk.Layer(
+            "GeoJsonLayer",
+            course_fc,
+            id="course",
+            stroked=True,
+            filled=False,
+            get_line_color=COURSE_COLOR,
+            line_width_min_pixels=3.5,
+            pickable=False,
+        )
     )
-    box = _fc_bounds(catchment_fc) or _fc_bounds(course_fc) or PYRENEES_BBOX
-    minx, miny, maxx, maxy = _pad(box)
-    view = pdk.ViewState(
-        longitude=(minx + maxx) / 2,
-        latitude=(miny + maxy) / 2,
-        zoom=_zoom_for_bounds(minx, miny, maxx, maxy),
+
+    # Frame to the widest thing on the map: the area polygon if we have one
+    # (it covers the interfluves the stream lines don't), else the lines.
+    box = None
+    if area is not None:
+        box = _fc_bounds({"type": "FeatureCollection", "features": [area]})
+    minx, miny, maxx, maxy = (
+        box or _fc_bounds(catchment_fc) or _fc_bounds(course_fc) or PYRENEES_BBOX
     )
+    view = compute_view([[minx, miny], [maxx, maxy], [minx, maxy], [maxx, miny]])
     return pdk.Deck(
-        layers=[catchment_layer, course_layer],
+        layers=layers,
         initial_view_state=view,
-        map_style=None,
+        # An explicit CARTO style (no token needed). Do NOT pass ``map_style=None``
+        # here: with no base map the deck.gl view never reaches "ready" and
+        # Streamlit renders it at its default world view (lat 0/lon 0/zoom 1),
+        # ignoring ``initial_view_state`` — which is why every basin showed up
+        # tiny and off near the Mediterranean.
+        map_style="light",
+        map_provider="carto",
         tooltip={"text": "{toponyme}\n{cleabs}"},
     )
 
@@ -247,12 +330,13 @@ def main() -> None:
     ss.setdefault("picked_trib", None)
 
     _sidebar_picker(rn, summ)
+    bassins_path = _sidebar_bassins()
 
     if ss.river_id is None or ss.river_id not in rn.rivers:
         _landing(rn, summ)
         return
 
-    _river_view(rn, path_str)
+    _river_view(rn, path_str, bassins_path)
 
 
 def _landing(rn: RiverNetwork, summ: pd.DataFrame) -> None:
@@ -273,7 +357,7 @@ def _landing(rn: RiverNetwork, summ: pd.DataFrame) -> None:
         st.rerun()
 
 
-def _river_view(rn: RiverNetwork, path_str: str) -> None:
+def _river_view(rn: RiverNetwork, path_str: str, bassins_path: str | None = None) -> None:
     ss = st.session_state
     river = rn.get(ss.river_id)
 
@@ -281,7 +365,7 @@ def _river_view(rn: RiverNetwork, path_str: str) -> None:
     chain = list(reversed(rn.downstream_path(river.id)))  # root ... -> river
     crumbs = st.columns(len(chain) + 1)
     for col, r in zip(crumbs, chain, strict=False):
-        label = (r.name or r.id[:12]) + (" ▸" if r.id != river.id else "")
+        label = (r.name or f"…{r.id[-6:]}") + (" ▸" if r.id != river.id else "")
         if col.button(label, key=f"crumb_{r.id}", disabled=(r.id == river.id)):
             ss.river_id = r.id
             ss.picked_trib = None
@@ -310,8 +394,31 @@ def _river_view(rn: RiverNetwork, path_str: str) -> None:
 
     course_fc = rn.river_path_geojson(river.id)
     catchment_fc = rn.river_catchment_geojson(river.id)
+    area_poly, area_km2, area_covered = _catchment_area(path_str, river.id, bassins_path)
 
-    left, right = st.columns([3, 2], gap="medium")
+    if area_poly is not None:
+        note = (
+            ""
+            if river.is_root
+            else " — includes this watercourse's reaches downstream of the loaded network"
+        )
+        basins = f"{area_covered} sub-basin" + ("" if area_covered == 1 else "s")
+        st.caption(
+            f"Catchment area ≈ **{area_km2:,.0f} km²** "
+            f"({basins}, BD Carthage topographic watersheds){note}."
+        )
+    elif bassins_path:
+        st.caption(
+            "No topographic sub-basin covers this watercourse in the loaded "
+            "`bassin_versant_topographique` dump — showing the stream network only."
+        )
+
+    show_panel = st.sidebar.toggle(
+        "Show info panel", value=True, key="show_panel", help="Collapse it for a full-width map."
+    )
+
+    left, right = st.columns([3, 2], gap="medium") if show_panel else (st.container(), None)
+    map_height = 620 if show_panel else 800
 
     with left:
         deck = river_deck(
@@ -319,64 +426,77 @@ def _river_view(rn: RiverNetwork, path_str: str) -> None:
             catchment_fc,
             picked_river_id=ss.picked_trib,
             segment_to_river=rn.segment_to_river,
+            catchment_area=area_poly,
         )
         event = st.pydeck_chart(
             deck,
             width="stretch",
-            height=620,
+            height=map_height,
             on_select="rerun",
             selection_mode="single-object",
+            # Re-key per river so the widget remounts and actually applies the
+            # new initial_view_state — pydeck-in-Streamlit keeps the old camera
+            # across plain reruns, which left every basin framed at Europe zoom.
+            key=f"deck_{river.id}",
         )
         hit = _picked_river(event, rn.segment_to_river)
         if hit and hit != ss.picked_trib:
             ss.picked_trib = hit
             st.rerun()
+        wash = " · pale-blue wash = drainage area" if area_poly is not None else ""
         st.caption(
-            f"Orange = {river.name or 'this river'}'s course · blue = its catchment network · "
-            "click any blue reach to select that tributary."
+            f"Orange = {river.name or 'this river'}'s course · blue = its catchment "
+            f"stream network{wash} · click any blue reach to select that tributary."
         )
 
-    with right:
-        tribs = rn.children(river.id)
-        st.markdown(f"**Tributaries ({len(tribs)})** — biggest first")
-        if tribs:
-            trib_df = pd.DataFrame(
-                {
-                    "name": [t.name or t.id for t in tribs],
-                    "km": [round(t.length_m / 1000, 1) for t in tribs],
-                    "ord": [t.max_order for t in tribs],
-                    "upstream": [len(rn.upstream_rivers(t.id)) for t in tribs],
-                    "id": [t.id for t in tribs],
-                }
-            )
-            ev = st.dataframe(
-                trib_df.drop(columns="id"),
-                width="stretch",
-                height=280,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="trib_table",
-            )
-            rows = ev.selection.rows if ev and ev.selection else []
-            if rows:
-                ss.picked_trib = trib_df.iloc[rows[0]]["id"]
-            if ss.picked_trib and ss.picked_trib in rn.rivers:
-                pt = rn.get(ss.picked_trib)
-                b1, b2 = st.columns(2)
-                if b1.button(f"▸ enter {pt.name or pt.id}", type="primary"):
-                    ss.river_id = pt.id
-                    ss.picked_trib = None
-                    st.rerun()
-                n_up = len(rn.upstream_rivers(pt.id))
-                b2.caption(f"{pt.length_m / 1000:.1f} km · {n_up} upstream")
-        else:
-            st.caption("Leaf river — no tributaries.")
-
-        st.markdown("**Catchment tree**")
-        st.text("\n".join(_catchment_tree_lines(rn, river.id)))
+    if right is not None:
+        with right:
+            _info_panel(rn, river)
 
     _downloads(river, course_fc, catchment_fc)
+
+
+def _info_panel(rn: RiverNetwork, river) -> None:
+    """The right-hand column: tributary table + catchment tree text."""
+    ss = st.session_state
+    tribs = rn.children(river.id)
+    st.markdown(f"**Tributaries ({len(tribs)})** — biggest first")
+    if tribs:
+        trib_df = pd.DataFrame(
+            {
+                "name": [t.name or t.id for t in tribs],
+                "km": [round(t.length_m / 1000, 1) for t in tribs],
+                "ord": [t.max_order for t in tribs],
+                "upstream": [len(rn.upstream_rivers(t.id)) for t in tribs],
+                "id": [t.id for t in tribs],
+            }
+        )
+        ev = st.dataframe(
+            trib_df.drop(columns="id"),
+            width="stretch",
+            height=280,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="trib_table",
+        )
+        rows = ev.selection.rows if ev and ev.selection else []
+        if rows:
+            ss.picked_trib = trib_df.iloc[rows[0]]["id"]
+        if ss.picked_trib and ss.picked_trib in rn.rivers:
+            pt = rn.get(ss.picked_trib)
+            b1, b2 = st.columns(2)
+            if b1.button(f"▸ enter {pt.name or pt.id}", type="primary"):
+                ss.river_id = pt.id
+                ss.picked_trib = None
+                st.rerun()
+            n_up = len(rn.upstream_rivers(pt.id))
+            b2.caption(f"{pt.length_m / 1000:.1f} km · {n_up} upstream")
+    else:
+        st.caption("Leaf river — no tributaries.")
+
+    st.markdown("**Catchment tree**")
+    st.text("\n".join(_catchment_tree_lines(rn, river.id)))
 
 
 # --------------------------------------------------------------------------- sidebar
@@ -399,6 +519,32 @@ def _sidebar_source() -> str | None:
     return path_str
 
 
+def _sidebar_bassins() -> str | None:
+    """Path to a local ``bassin_versant_topographique`` dump, or ``None``.
+
+    Optional: without it the map shows the stream network only. With it, the real
+    catchment-area polygon (dissolved sub-basins) is shaded under each river.
+    """
+    st.sidebar.markdown("---")
+    st.sidebar.header("Catchment-area polygon")
+    found = next((p for p in BASSIN_CANDIDATES if p.exists()), None)
+    default = str(found) if found else ""
+    path_str = st.sidebar.text_input(
+        "bassin_versant_topographique dump (optional)",
+        value=default,
+        help="Dump it with:  valleespyr wfs dump --layer "
+        "BDTOPO_V3:bassin_versant_topographique --bbox <pyrenees> -o "
+        "data/raw/bassin_versant_topographique_pyrenees.parquet",
+    )
+    path_str = path_str.strip()
+    if not path_str:
+        return None
+    if not Path(path_str).exists():
+        st.sidebar.warning(f"`{path_str}` not found — showing stream lines only.")
+        return None
+    return path_str
+
+
 def _sidebar_picker(rn: RiverNetwork, summ: pd.DataFrame) -> None:
     st.sidebar.header("Go to river")
     named = summ[summ["name"].notna()].copy()
@@ -411,9 +557,7 @@ def _sidebar_picker(rn: RiverNetwork, summ: pd.DataFrame) -> None:
     named = named.sort_values("length_km", ascending=False)
 
     options = named["id"].tolist()
-    labels = {
-        r.id: f"{r['name']}  ({r['length_km']:.0f} km)" for _, r in named.iterrows()
-    }
+    labels = {r.id: f"{r['name']}  ({r['length_km']:.0f} km)" for _, r in named.iterrows()}
     choice = st.sidebar.selectbox(
         f"{len(options)} match",
         options=options,
