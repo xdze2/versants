@@ -1,211 +1,194 @@
-# TODO — `troncon_hydrographique` + upstream tree
+# TODO — DEM catchment delineation (Copernicus GLO-30 + pysheds demo)
 
-Goal: from a pour point, trace the stream network **upstream** and present it as a
-**tree view** (text/indented first, map later). This is the building block for a
-real "valley catchment", which the coarse `bassin_versant_topographique` layer
-can't give us.
+Goal: compute a **real catchment polygon for any river**, from a DEM, because
+`bassin_versant_topographique` cannot give us one.
 
-## DONE (this session)
+Next session: a single self-contained demo script that delineates the **Gave de
+Lutour** catchment from a GLO-30 tile and compares it against the known 39 km²
+BD TOPO polygon. Validate on one valley before building any pipeline.
 
-- `networkx>=3.0` added to core deps.
-- `src/valleespyr/hydro/network.py`: `load_troncons()` (offline GeoJSON/parquet,
-  drops Z, normalises "nan"/NA text, adds `length_m`), `fetch_troncons()` (live
-  WFS, handles the URN-CRS lat/lon axis swap), `build_graph()` → downstream-
-  pointing `nx.DiGraph` (applies `sens_de_l_ecoulement`, flags `Double sens`/
-  `Indéterminé` as `ambiguous`, drops self-loops, keeps the longest parallel edge).
-- `src/valleespyr/hydro/trace.py`: `snap_pour_point()`, `trace_upstream()` (BFS on
-  predecessors, visited-set cycle guard), `to_tree()` (nested dict, children by
-  descending upstream length, `collapse_chains`, `min_order` prune),
-  `drop_fictif()` (splice connector edges out of the printed tree, totals kept).
-- CLI `valleespyr hydro tree --from-file … --point LON,LAT [--bbox …]
-  [--min-order N] [--no-fictif] [--no-collapse] [--max-depth N] [--json]` — ASCII
-  `├──` tree + summary line.
-- Streamlit: "Upstream trace (streams)" view — pour-point text field, hide-fictif
-  + min-order toggles, traced network drawn on a pydeck map, indented tree,
-  GeoJSON download. Graph build cached per file.
-- Tests: `tests/test_hydro.py` (14, Y-network fixture + offline gavarnie sanity:
-  >200 edges, >50 km, excludes Gave de Héas) + 1 Streamlit view test. 33 total pass.
+## Why (measured, not assumed)
 
-Verified against the gavarnie sample: pour point `(-0.0086, 42.7350)` → 349 edges
-traced, 88.9 km; with `--no-fictif --min-order 3` → 17.5 km of Gave des Tourettes
-/ Gave de Pau source / Ruisseau de Pailla / Ruisseau du Taillon. Gave de Héas
-correctly excluded (joins downstream).
+`bassin_versant_topographique` is the only BD TOPO source of drainage area — the
+tronçon layer is `LineString` only, `cours_d_eau` is `MultiLineString`, and
+`surface_hydrographique` is open water (lakes/reservoirs, median 0.001 km²), not
+catchments. That single area source fails us in three ways:
 
-## DONE (river-graph session)
+- **Coverage.** Only **86 of 2755 named rivers** in the Pyrénées dump get a
+  polygon. `Neste de Rioumajou` (23.4 km, ord 5) and `Neste de la Géla` (21 km)
+  get none, while the neighbouring `Gave de Lutour` / `Gave d'Ossoue` do — the
+  gaps are not systematic, which is worse than uniform coarseness for a UI.
+- **Model.** Sub-basins are keyed to a *whole* `cours_d_eau` via
+  `liens_vers_cours_d_eau_principal`, one polygon per *reach* of a trunk river.
+  Tributary basins are absorbed into the trunk's reaches — literally marked
+  `(incluse)` in the toponyme, e.g. *"La Neste du confluent de la Neste de
+  Rioumajou (incluse) au confluent du Lavedan"*. Rioumajou's basin exists in the
+  data, just not as its own record.
+- **Resolution.** The Lutour polygon is 173 vertices over a 29 km perimeter —
+  **median vertex spacing 165 m**, `precision_planimetrique` 20 m, digitised from
+  BDCarto, last modified 2012. Draped on a 1 m RGE ALTI surface it will visibly
+  cut across terrain instead of following ridgelines. Not good enough for 3D.
 
-- `src/valleespyr/hydro/rivers.py`: `build_river_network(troncon_digraph)` →
-  `RiverNetwork`. Rolls tronçons up by `liens_vers_cours_d_eau` (first id of a
-  `/`-joined list); unnamed reaches merge downstream into the first named river.
-  Each `River`: id, name (most-common toponyme), segments, nodes, outlet,
-  source_nodes, length_m, max_order, parent_id, child_ids, is_root/is_leaf.
-  `RiverNetwork`: `by_name`, `roots`, `leaves`, `parent`, `children`,
-  `upstream_rivers(named_only=)`, `downstream_path`, `summary`,
-  `river_path_geojson`, `river_catchment_geojson`.
-- `build_graph` now also carries `liens_vers_cours_d_eau` onto edges.
-- Cycle guard: BD TOPO over-splits some watercourses into `cours_d_eau` records
-  that point at each other at the confluence → `_merge_cycles` contracts each
-  SCC>1 into its longest member so the river graph stays a DAG.
-- CLI `valleespyr hydro rivers list` (--named-only/--roots/--min-length-km/-n/
-  --json) and `... rivers show QUERY` (name substring or COURDEAU id; disambiguates
-  on multiple matches; `--geojson path|catchment -o`).
-- `tests/test_rivers.py` (12: hand-built Main/Trib/unnamed-reach fixture +
-  offline gavarnie roll-up sanity). 44 total pass.
+Checked for a finer source, found none: `BDCARTO_V5:bassin_versant_topographique`
+returns the same 9 polygons over the Rioumajou bbox, `MTE_MASSE-EAU:_surface_
+bassins-versants` returns 0 there, and Sandre's authoritative TOPAGE
+(`sa:BassinVersantTopographique_FXX`) returns the same 9 with the same
+`(incluse)` toponymes. No `topage` layer exists on the Géoplateforme.
 
-Verified on the gavarnie sample: 370 rivers, DAG, Gave de Pau is the root
-(order 7), gaves de Héas / d'Estaubé / d'Ossoue / d'Aspé in its catchment;
-la Neste and Gave de Lutour are separate roots (outlets leave the sample bbox).
+## Why GLO-30 first (not RGE ALTI)
 
-## STILL OPEN / next
+Prototype on **Copernicus GLO-30** (30 m, global, OpenTopography API):
 
-- **Bulk-dump `troncon_hydrographique` for the whole Pyrénées** (`wfs dump`,
-  bbox ~ `-2.0,42.3,3.2,43.4`) so the river graph closes — Lutour/Neste/etc.
-  attach to the Adour / Garonne trunks instead of being false roots.
-- **Real catchment polygons.** `river_catchment_geojson` currently returns the
-  upstream *line network*, not an area. Options: (a) dissolve intersecting
-  `bassin_versant_topographique` polygons (data already downloaded), (b) DEM
-  delineation from the outlet node (`pysheds`/WhiteboxTools, the `dem` extra).
-  Ship (a) first.
-- ~~Streamlit: a "Rivers" page~~ — DONE: `app.py` rewritten from scratch as a
-  river-graph navigator (sidebar picker / root-basin landing table → course +
-  catchment pydeck map → tributary list + catchment-tree text → click a reach
-  or row to drill in → breadcrumb / "↓ downstream" to walk back). `RiverNetwork`
-  cached per dump via `@st.cache_resource`. `tests/test_app.py` rewritten.
-- **`build_river_network` was nondeterministic under `PYTHONHASHSEED`** (river
-  count varied 367–370, catchment membership flipped). Fixed: every downstream
-  tie-break / SCC-merge / graph-edge pass now sorts. Also switched the river
-  graph to connect *every* outflow node of a river (not one chosen `outlet`),
-  which fixed the Gave d'Ossoue showing as a false root.
-- A multi-outflow river now can have >1 parent in the river graph; `parent_id`
-  / `downstream_path` follow the first sorted one. Revisit if it matters.
-- The 0.3 km "Gave d'Ossoue" second `cours_d_eau` record (and similar short
-  stubs) still list as tributaries of the main course. Decide: merge same-name
-  parent/child within a short distance, or leave as data quirk.
-- `RiverNetwork` persistence: building it for the whole Pyrénées every CLI call
-  is wasteful — pickle/parquet the rolled-up graph.
+- small enough to iterate on — a valley tile is MB, not GB;
+- **covers Spain**, so border-straddling catchments work. RGE ALTI stops at the
+  frontier, the same limitation that already truncates our tronçon network
+  (54 `code_du_pays = ES` segments in the gavarnie sample, unconnected);
+- 30 m is plenty to validate that the *pipeline* is correct.
 
-## (earlier) STILL OPEN / next
+Move to RGE ALTI 1 m / 5 m only once the method is proven, and only per-valley.
 
-- `sens_de_l_ecoulement` inversion is coded but untested on real data — the whole
-  gavarnie sample is `"Sens direct"`. Find a bbox with `"Sens inverse"` edges.
-- The trace can touch the bbox edge silently — warn / auto-expand the fetch.
-- Braided `Gave de Pau` sections near Gavarnie village give every node 2 upstream
-  edges, so `collapse_chains` can't fire there. Maybe collapse across a 2-cycle.
+## The demo (next session)
+
+One script, `scratchpad/dem_lutour.py` (promote to `hydro/dem.py` once it works).
+
+**Target: Gave de Lutour.** Chosen because it has a known reference polygon
+(39 km², 1 sub-basin) to check against, and it is a compact upper valley.
+Course bounds `-0.1090, 42.7742 → -0.0847, 42.8728`; fetch a padded tile, say
+`-0.16, 42.74 → -0.04, 42.90`.
+
+### Steps
+
+1. **Fetch the DEM.** OpenTopography REST API, `demtype=COP30`, the bbox above,
+   GeoTIFF out. Needs a free API key (`OPENTOPOGRAPHY_API_KEY` env var) — note it
+   in the README when this lands. Cache the tile under `data/raw/`.
+
+2. **Condition the DEM.** `fill_depressions` → `resolve_flats`. Pits are cells
+   lower than every neighbour (noise, bridges, or real karst/tarns); water entering
+   one never leaves and flow routing stalls. **Watch this step in glacial cirques**
+   — some Pyrenean depressions are real, and filling them is technically wrong but
+   usually necessary. Compare filled vs raw to see how much was altered.
+
+3. **Flow direction + accumulation.** D8 (steepest of 8 neighbours). Its known
+   weakness is quantising flow to 8 angles, which zig-zags on smooth slopes;
+   D-infinity is the fallback if the delineation looks bad. Accumulation = how many
+   cells drain through each cell, so high values trace the channel network.
+
+4. **Snap the pour point — the step that actually decides success.** The outlet
+   comes from BD TOPO vector coords, the flow grid comes from the DEM; they are
+   different datasets and will not agree exactly. Off by two cells onto a valley
+   wall and you delineate a 0.2 km² hillside instead of a 39 km² valley, silently
+   and plausibly. Use `grid.snap_to_mask(acc > threshold, (lon, lat))`. We have an
+   advantage here: BD TOPO tronçon geometry says where the stream really is, so
+   snap toward it rather than guessing.
+
+5. **Delineate + vectorise.** `grid.catchment(...)` walks the flow grid backwards
+   from the outlet; every cell draining to it is in the catchment. Then
+   `rasterio.features.shapes` → polygon → simplify a little → WGS84.
+
+### Sketch
+
+```python
+grid = Grid.from_raster(tif)
+dem  = grid.read_raster(tif)
+filled   = grid.fill_depressions(dem)
+inflated = grid.resolve_flats(filled)
+fdir = grid.flowdir(inflated)
+acc  = grid.accumulation(fdir)
+x, y = grid.snap_to_mask(acc > 1000, (outlet_lon, outlet_lat))
+catch = grid.catchment(x=x, y=y, fdir=fdir, xytype='coordinate')
+```
+
+### Validation — the whole point of picking Lutour
+
+| check | expectation |
+|---|---|
+| area vs BD TOPO reference | **39 km²**, ±15% is fine at 30 m |
+| shape | follows ridgelines; IoU vs reference > ~0.8 |
+| contains its own streams | every Lutour tronçon inside the polygon |
+| pour-point sanity | moving the outlet ±100 m must not change area 10× |
+
+Then run the *same* code on **Neste de Rioumajou** (no reference exists) and check
+the result is plausible — that is the case the whole exercise is for.
+
+### Deps
+
+`pysheds` (NumPy-based, pip-installable, lightest) + the existing `dem` extra
+(`rasterio`, `rioxarray`, `xarray`). Note: the `dem` extra is declared in
+`pyproject.toml` but **not currently installed** — `uv sync --extra dem` first.
+Alternatives if pysheds disappoints: `richdem` (faster on big grids),
+`WhiteboxTools` (most complete, ships a binary).
+
+## After the demo works
+
+- Promote to `src/valleespyr/hydro/dem.py`: `fetch_dem(bbox)`,
+  `delineate(dem, lon, lat)` → shapely polygon, tile caching.
+- Wire into the app: when a river has no `bassin_versant_topographique` polygon,
+  offer "compute catchment from DEM". Keep the BD TOPO polygon where it exists —
+  it stays useful as a **validation reference**, not a competitor.
+- Real area/elevation stats per catchment (hypsometry, min/max/mean elevation) —
+  this is what the 3D maps actually want.
+- Drape the traced stream network on the DEM (`Merge traced network → single
+  MultiLineString`, carried over from the earlier todo).
+
+## Still open (carried over, unrelated to DEM)
+
+- **`--wfs-endpoint` does not exist.** The README says the endpoint is
+  configurable; it is not — there is no such option on `valleespyr wfs` or its
+  subcommands. Had to `curl` Sandre directly to check TOPAGE. Add the flag or fix
+  the README.
+- **Catchment display bug, unresolved.** The area polygon rendered far too large
+  and convex in the browser for some rivers. Not reproducible from current code —
+  every river checked frames correctly and all real polygons are strongly
+  non-convex (area/hull 0.32–0.41). Suspected stale `@st.cache_resource` in a
+  long-running server, never confirmed. The new static matplotlib map bypasses
+  deck.gl entirely, so it is now a useful discriminator: if a river looks right
+  there and wrong on the interactive map, the fault is in the deck viewport.
+- **28 root rivers still over-reach.** A sub-basin is keyed to a whole
+  watercourse, so a river whose outlet leaves the dump gets a polygon covering its
+  full length. Inherent to any finite bbox. Consider a visible warning on
+  `river.is_root` rather than the current trailing caption clause.
+- `sens_de_l_ecoulement` inversion is coded but still untested on real data — the
+  whole Pyrénées dump may be `"Sens direct"`. Find a bbox with `"Sens inverse"`.
+- A multi-outflow river can have >1 parent; `parent_id` / `downstream_path` follow
+  the first sorted one. Revisit if it matters.
+- Short same-name `cours_d_eau` stubs (e.g. a 0.3 km second "Gave d'Ossoue")
+  list as tributaries of the main course. Merge, or accept as a data quirk.
+- `RiverNetwork` persistence: 7.4 s to build the 6652-river graph from the 62k
+  Pyrénées dump on every cold start. Pickle/parquet the rolled-up graph.
 - Click-on-map pour point in Streamlit (currently a text field).
-- Merge traced network → single MultiLineString for DEM draping.
 - Strahler recomputation from the graph (don't trust `numero_d_ordre`).
 
-## Context recap (state at end of last session)
+## Current state
 
-- Repo has: `sources/wfs.py` (WFS 2.0 client), `watershed.py`, `dump.py`
-  (`valleespyr wfs dump`), `app.py` (Streamlit explorer). 13 tests pass.
-- Local data (gitignored, present on this machine):
-  - `data/raw/bassin_versant_topographique_fr.parquet` — 6633 feats, all FR
-  - `data/raw/bassin_versant_topographique_pyrenees.parquet` — 532 feats
-  - `data/raw/troncon_hydrographique_gavarnie_sample.geojson` — 3097 edges,
-    bbox `42.68,-0.10 .. 42.85,0.20` (Gave de Pau headwaters, incl. gaves
-    d'Ossoue / Estaubé / Héas / Aspé). **Use this as the offline fixture.**
+- **Data** (gitignored):
+  - `data/raw/troncon_hydrographique_pyrenees.parquet` — **62111 features**,
+    bbox `-0.80,42.60,0.65,43.55`. 6652 rivers, 2755 named, 1639 roots.
+    Graph builds in 7.4 s.
+  - `data/raw/bassin_versant_topographique_pyrenees.parquet` — 532 polygons,
+    covers the tronçon bbox comfortably (`-1.857,42.333 → 3.357,43.639`).
+  - `data/raw/troncon_hydrographique_gavarnie_sample.geojson` — 3097 edges.
+    **Keep as the offline test fixture** (fast).
+- **Code**: `hydro/network.py` (tronçon → DiGraph), `hydro/trace.py` (pour-point
+  upstream trace), `hydro/rivers.py` (roll up to `RiverNetwork`), `watershed.py`
+  (`catchment_polygon` dissolve), `app.py` (Streamlit navigator, pydeck +
+  static matplotlib map), `dump.py`, `sources/wfs.py`. 50 tests pass.
+- The wider re-dump fixed the false-root problem: **la Neste** went 30.2 km /
+  root → **158.2 km flowing into la Garonne**, and its polygon over-reach dropped
+  from 0.34° to 0.009°.
 
-## Layer: `BDTOPO_V3:troncon_hydrographique`
+## Reference: BD TOPO quirks worth not rediscovering
 
-WFS quirk: this layer's `BBOX` wants CRS `urn:ogc:def:crs:EPSG::4326` (lat,lon
-order). Plain `EPSG:4326` returned 0 features. `SRSNAME=urn:ogc:def:crs:EPSG::4326`
-also returns coords in lat,lon — reproject/swap on ingest.
-(The watershed layer accepted plain `EPSG:4326` fine — don't assume uniformity.)
-
-### Topology fields (verified against real data)
-
-| field | meaning | observed |
-|---|---|---|
-| `cleabs` | stable edge id | `TRON_EAU0000002222751383` |
-| `lien_vers_noeud_hydrographique_ini` | from-node | `NOEUDHYD…` |
-| `lien_vers_noeud_hydrographique_fin` | to-node | `NOEUDHYD…` |
-| `sens_de_l_ecoulement` | flow dir vs geometry | all `"Sens direct"` in sample; also `"Sens inverse"`, `"Double sens"`, `"Indéterminé"` exist — handle them |
-| `numero_d_ordre` | Strahler order | `"1".."7"`, sometimes `None` |
-| `reseau_principal_coulant` | on main flowing network | bool |
-| `fictif` | connector w/ no real channel (through lakes etc.) | ~11% true in sample |
-| `nature` | `Ecoulement naturel`, `Canal`, `Conduit forcé`, `Retenue`, `Lac`, … |
-| `liens_vers_cours_d_eau` | FK → `cours_d_eau` | `COURDEAU…` |
-| `cpx_toponyme_de_cours_d_eau` | river name (denormalized) | `"Gave de Pau"`; `None` for ~60% (small tribs) |
-| `geometrie` | `gml:CurvePropertyType` (LineString) | |
-
-### Graph model
-
-- Each tronçon = directed edge `ini -> fin` **after** applying `sens_de_l_ecoulement`
-  (`Sens inverse` ⇒ swap; `Double sens`/`Indéterminé` ⇒ flag, maybe treat as
-  undirected or drop).
-- **Upstream trace** from a node N: BFS/DFS collecting every edge whose `fin` is
-  already in the visited-node set, starting `visited = {N}`. Upstream of a point on
-  a tree network is itself a tree (each node has exactly one downstream edge on the
-  main network; braided `type_de_bras` sections can violate this — dedupe by node).
-- Root selection: snap pour point to nearest edge geometry, split conceptually,
-  take that edge's `ini` node as the trace root (or `fin` if you want to include
-  the edge the point sits on).
-
-## Tasks
-
-1. **`sources/wfs.py`**: nothing needed structurally, but add a note/const that
-   some layers need the URN CRS for BBOX. Consider a `bbox_crs` default per call
-   site rather than global.
-
-2. **`hydro/network.py`** (new module):
-   - `fetch_troncons(client, bbox, ...)` → GeoDataFrame (reproject lat,lon→lon,lat,
-     then to EPSG:2154 for length/snap).
-   - `build_graph(gdf)` → directed graph. Use `networkx.DiGraph` (add `networkx`
-     to core deps) OR a plain `dict[node] -> list[edge]` if we want zero deps.
-     Recommend networkx: we'll want `dfs_tree`, `descendants`, subgraph, etc.
-   - Node attrs: none from WFS (nodes are just ids); optionally fetch
-     `noeud_hydrographique` layer for node geometry/type if needed for display.
-   - Edge attrs: `cleabs`, `order`, `toponyme`, `nature`, `fictif`, `length_m`,
-     `reseau_principal_coulant`.
-
-3. **`hydro/trace.py`**:
-   - `snap_pour_point(gdf, lon, lat)` → (edge cleabs, root node, distance).
-   - `trace_upstream(graph, root_node)` → set of edge cleabs + induced subgraph.
-   - `to_tree(subgraph, root_node)` → nested dict:
-     `{node, edge_cleabs, toponyme, order, length_m, children: [...]}`.
-     Order children by descending upstream length or Strahler order.
-
-4. **Tree view — CLI first**:
-   - `valleespyr hydro tree --point LON,LAT [--bbox ...] [--from-file f.geojson]`
-   - Pretty indented print (rich.tree if we add `rich`, else manual `├──`).
-   - Collapse long unbranched chains: "Gave de Pau (order 4, 8.2 km, 12 segments)".
-   - `--max-depth`, `--min-order`, `--json` (emit the nested dict).
-   - Summary line: total upstream length, #segments, Strahler order at root,
-     drainage density if we also have area.
-
-5. **Tree view — Streamlit** (extend `app.py` or new `app_network.py`):
-   - Click/enter a pour point → show `st.dataframe` hierarchy or an indented
-     `st.expander` tree; highlight traced edges on the pydeck map.
-   - Toggle: exclude `fictif`, min Strahler order, main network only.
-
-6. **Validation**:
-   - Compare traced-upstream extent vs the dissolved `bassin_versant_topographique`
-     polygon for the same watercourse — should roughly nest.
-   - Known case: pour point at Gavarnie village `(-0.0086, 42.7350)` → upstream
-     should include gaves d'Ossoue, d'Aspé, de Pau source; NOT Gave de Héas
-     (that joins downstream). Sanity-check against the map.
-
-7. **Tests** (offline, use the saved gavarnie sample or a tiny hand-built graph):
-   - `sens_de_l_ecoulement` inversion handling.
-   - upstream trace on a Y-shaped toy network (2 tribs + trunk).
-   - `to_tree` nesting + child ordering.
-   - snap picks the nearest edge.
-   - cycle guard (braided channels) doesn't infinite-loop.
-
-## Open questions / decisions for next session
-
-- **networkx dependency?** (recommended) vs hand-rolled adjacency.
-- **rich for the tree print?** (nice) vs plain ASCII.
-- Handle `Double sens` / `Indéterminé` how — drop, or undirected fallback?
-- Do we need the `noeud_hydrographique` layer at all, or are node ids enough?
-- Where does the pour point come from — CLI arg, config yaml
-  (`config/gavarnie.yaml` already has `pour_point_wgs84`), or click-on-map?
-- Scope of the bbox fetch: auto-expand until the trace stops hitting the bbox
-  edge? (start simple: fixed generous bbox, warn if trace touches boundary.)
-
-## Nice-to-have later
-
-- Merge traced network → single MultiLineString for draping on the DEM.
-- Derive a pour-point watershed from the DEM (`pysheds`/WhiteboxTools) and compare
-  to both the BD TOPO polygon and the traced network extent.
-- Strahler recomputation from the graph (don't trust `numero_d_ordre` blindly).
+- `troncon_hydrographique` wants `BBOX` in `urn:ogc:def:crs:EPSG::4326`
+  (lat,lon). Plain `EPSG:4326` returns 0 features. The watershed layer accepts
+  plain `EPSG:4326` — do not assume uniformity across layers.
+- Segments connect by shared node id: B follows A when `B.ini == A.fin`. Node ids
+  say how segments *touch*, not which way water flows — that is
+  `sens_de_l_ecoulement` (`Sens inverse` ⇒ swap the nodes before adding the edge).
+- A tronçon is **not** one reach between confluences: the layer also splits on
+  attribute changes, so segments are short (median 210 m, up to 84 per river).
+  Confluences are always splits, though.
+- `fictif` marks virtual connectors drawn through lakes/braids (~11% of the
+  gavarnie sample) to keep the network connected.
+- BD TOPO over-splits some watercourses into `cours_d_eau` records that point at
+  each other at the confluence → `_merge_cycles` contracts each SCC>1 so the
+  river graph stays a DAG.
