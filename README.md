@@ -53,6 +53,23 @@ valleespyr wfs dump -o data/raw/bassin_versant_topographique_fr.parquet         
 valleespyr wfs dump --bbox -2.0,42.3,3.2,43.4 -o data/raw/bv_pyrenees.parquet     # Pyrénées only (~530 feats, 2 MB)
 ```
 
+### Explore it in the browser
+
+```bash
+pip install -e ".[app]"
+streamlit run src/valleespyr/app.py      # or: valleespyr-app
+```
+
+The Streamlit explorer reads the local dump (falls back to a live WFS bbox
+fetch if none is found) and lets you:
+
+- pan/zoom a pydeck map of the watershed polygons
+- filter by basin district, toponyme substring, and area
+- switch between **sub-catchments** and **dissolved by watercourse**
+  (`liens_vers_cours_d_eau_principal` — one polygon per whole named river)
+- select rows in the table to highlight them on the map
+- download the current selection as GeoJSON / GeoParquet / CSV
+
 ### Why WFS and not the bulk file store
 
 IGN's *Service Téléchargement* (`data.geopf.fr/telechargement`) ships BD TOPO as
@@ -71,6 +88,7 @@ src/valleespyr/
   cli.py           click CLI  (group: `wfs`)
   watershed.py     fetch / select topographic watersheds
   dump.py          bulk-download a whole layer (paged) to GeoJSON/GeoParquet/GPKG
+  app.py           Streamlit explorer (map + table + filters + downloads)
   sources/wfs.py   minimal OGC WFS 2.0 client
 data/raw|processed getignored working data
 tests/             offline unit tests

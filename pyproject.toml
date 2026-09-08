@@ -26,6 +26,10 @@ viz = [
     "pydeck>=0.9",
     "matplotlib>=3.8",
 ]
+app = [
+    "streamlit>=1.30",
+    "pydeck>=0.9",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -33,6 +37,9 @@ dev = [
 
 [project.scripts]
 valleespyr = "valleespyr.cli:cli"
+
+[project.gui-scripts]
+valleespyr-app = "valleespyr.app:_run_streamlit"
 
 [build-system]
 requires = ["hatchling"]
