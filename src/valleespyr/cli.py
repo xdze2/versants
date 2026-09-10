@@ -714,6 +714,111 @@ def valley_render(
     click.echo(str(Path(output).resolve()))
 
 
+@valley.command("plate")
+@click.argument("query")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option("--demtype", default="COP30", show_default=True, help="OpenTopography DEM type.")
+@click.option(
+    "--acc-channel-cells",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Flow-accumulation threshold (cells) that defines a channel for the snap.",
+)
+@click.option(
+    "--dem-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Cache the DEM tile here (default: fetch_dem's own cache location).",
+)
+@click.option(
+    "--crs",
+    default="EPSG:2154",
+    show_default=True,
+    help="Projected CRS to draw in (Lambert-93 for the French Pyrénées).",
+)
+@click.option("--no-png", is_flag=True, help="Write only the SVG, skip the sibling PNG.")
+@click.option(
+    "--refresh-osm", is_flag=True, help="Re-query Overpass even if the extent is cached."
+)
+@click.option("-o", "--output", required=True, help="Destination .svg file.")
+@click.pass_context
+def valley_plate(
+    ctx: click.Context,
+    query: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    demtype: str,
+    acc_channel_cells: int,
+    dem_dir: str | None,
+    crs: str,
+    no_png: bool,
+    refresh_osm: bool,
+    output: str,
+) -> None:
+    """Render one river's catchment as a minimal black-and-white topo plate.
+
+    Delineates the catchment from a DEM (as ``valley render`` does), pulls the
+    human layer — trails, GR/HR routes, roads, refuges and cabanes, named
+    summits and cols — from OpenStreetMap, and draws it all as an SVG (+ a
+    sibling PNG unless ``--no-png``). Needs ``OPENTOPOGRAPHY_API_KEY`` set; the
+    DEM tile and the Overpass response are both cached under ``data/raw``.
+    """
+    from pathlib import Path
+
+    from . import valley as valley_mod
+    from .render.plate import build_plate
+    from .sources.osm import fetch_osm_features
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+    try:
+        river = valley_mod.resolve_river(rn, query)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        poly, diag = valley_mod.delineate_river(
+            rn,
+            river.id,
+            dem_dir=Path(dem_dir) if dem_dir else None,
+            demtype=demtype,
+            acc_channel_cells=acc_channel_cells,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_diag(diag)
+    if diag["course_inside_frac"] < 0.9:
+        click.echo(
+            f"warning: only {diag['course_inside_frac'] * 100:.0f}% of the river's course "
+            "falls inside the delineated catchment — the snap may be off",
+            err=True,
+        )
+
+    west, south, east, north = poly.bounds
+    osm = fetch_osm_features((west, south, east, north), refresh=refresh_osm)
+
+    streams_fc = rn.river_catchment_geojson(river.id)
+    subtitle = (
+        f"{diag['area_km2']:.1f} km²  ·  contours 20 m (index 100 m)  ·  COP30  ·  OSM"
+    )
+    written = build_plate(
+        poly,
+        Path(diag["dem_tif"]),
+        streams_fc,
+        osm,
+        Path(output),
+        title=river.name or river.id,
+        subtitle=subtitle,
+        crs=crs,
+        write_png=not no_png,
+    )
+    for p in written:
+        click.echo(f"wrote {p}", err=True)
+    click.echo(str(Path(output).resolve()))
+
+
 def _render_tree(node: dict, *, max_depth: int | None) -> list[str]:
     """ASCII tree lines: '├── Gave de Pau  (order 4, 8.2 km, 12 seg)'."""
     lines: list[str] = []

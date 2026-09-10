@@ -25,6 +25,21 @@ the surface, self-contained HTML with no server. Built by
 
 ![Gave de Lutour — near-plan view](docs/images/lutour_3d_top.png)
 
+### 2D topo plate prototype
+
+First `valley plate` output: the **Neste de Rioumajou** catchment (86 km²,
+straddles the FR/ES border) as a minimal black-and-white topo plate — 20 m
+contours from COP30, the BD TOPO stream network, and the human layer (trails,
+hiking routes, roads, refuges/cabanes, named summits and cols) pulled from
+OpenStreetMap in one Overpass query. Built by
+`valleespyr valley plate "Neste de Rioumajou" --from-file … -o rioumajou.svg`.
+
+Rough first pass — contours are over-dense, unnamed peaks are unfiltered and
+labels collide; a styling pass is pending (keep 20 m contours but lighten the
+minor lines so the human layer reads on top).
+
+![Neste de Rioumajou — first 2D topo plate](scratchpad/rioumajou.png)
+
 ## Install
 
 ```bash
