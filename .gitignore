@@ -4,6 +4,8 @@
 !/data/raw/.gitkeep
 !/data/processed/.gitkeep
 
+*.secret
+
 # python
 __pycache__/
 *.py[cod]

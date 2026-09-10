@@ -7,6 +7,47 @@ Next session: a single self-contained demo script that delineates the **Gave de
 Lutour** catchment from a GLO-30 tile and compares it against the known 39 km²
 BD TOPO polygon. Validate on one valley before building any pipeline.
 
+## DONE — the Lutour demo works (2026-09-10)
+
+`scratchpad/dem_lutour.py` runs end to end on a real COP30 tile
+(`data/raw/cop30_lutour.tif`, 1.1 MB, 576×432 @ ~31 m). Needs a free
+`OPENTOPOGRAPHY_API_KEY`; note this in the README when the code is promoted.
+
+| check | result |
+|---|---|
+| area (DEM) vs reference | **39.49 km² vs 39.34 km² → +0.4%** |
+| IoU vs reference | **0.96** |
+| pour-point snap | 0.3 cells — DEM channel and BD TOPO outlet agree |
+| depression fill | 0.61% of tile (well under the 5% cirque warning) |
+| Lutour tronçons inside | 45/45 (the last is a `fictif` connector *on* the divide) |
+
+The DEM boundary **follows ridgelines** where the 2012 BDCarto reference cuts
+across them — see `scratchpad/lutour_catchment_dem.png`. Method proven; the
+`snap` step was a non-event here because the outlet coord came straight from
+tronçon geometry, as planned.
+
+Gotchas found:
+
+- **pysheds 0.5 (latest) is broken on NumPy 2.x** — it calls `np.in1d`, removed
+  in NumPy 2.0. The script shims `np.in1d = np.isin` before importing pysheds
+  (exact alias for 1-D arrays). Carry this into `hydro/dem.py`. Pinning
+  `numpy<2` instead would drag numba/scipy/rasterio back and fight the rest of
+  the project.
+- `Grid.from_raster` warns "No `nodata` value detected. Defaulting to 0." — COP30
+  from OpenTopography has no nodata tag. Harmless here (min elevation 870 m), but
+  set nodata explicitly when a tile might contain real 0 m cells (coast).
+- pysheds API vs the todo sketch: it's `grid.fill_pits` → `fill_depressions` →
+  `resolve_flats` (three steps, not two), and `snap_to_mask(mask, (x, y))`
+  returns `(x, y)`, not indices.
+
+### Next
+
+1. Run the *same* script on **Neste de Rioumajou** — the border-straddling case
+   the whole exercise is for. COP30 covers Spain; the outlet coord comes from the
+   tronçon dump the same way. No reference polygon exists, so the check is
+   "plausible area + contains its own streams".
+2. Then promote to `src/valleespyr/hydro/dem.py` (see "After the demo works").
+
 ## Why (measured, not assumed)
 
 `bassin_versant_topographique` is the only BD TOPO source of drainage area — the
