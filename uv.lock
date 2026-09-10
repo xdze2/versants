@@ -2445,6 +2445,12 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+plate = [
+    { name = "matplotlib" },
+    { name = "pysheds" },
+    { name = "rasterio", version = "1.4.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "rasterio", version = "1.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 render = [
     { name = "matplotlib" },
     { name = "pillow" },
@@ -2462,6 +2468,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "geopandas", specifier = ">=1.0" },
     { name = "matplotlib", marker = "extra == 'app'", specifier = ">=3.8" },
+    { name = "matplotlib", marker = "extra == 'plate'", specifier = ">=3.8" },
     { name = "matplotlib", marker = "extra == 'render'", specifier = ">=3.8" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.8" },
     { name = "networkx", specifier = ">=3.0" },
@@ -2471,10 +2478,12 @@ requires-dist = [
     { name = "pydeck", marker = "extra == 'viz'", specifier = ">=0.9" },
     { name = "pyproj", specifier = ">=3.6" },
     { name = "pysheds", marker = "extra == 'dem'", specifier = ">=0.4" },
+    { name = "pysheds", marker = "extra == 'plate'", specifier = ">=0.4" },
     { name = "pysheds", marker = "extra == 'render'", specifier = ">=0.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rasterio", marker = "extra == 'dem'", specifier = ">=1.3" },
+    { name = "rasterio", marker = "extra == 'plate'", specifier = ">=1.3" },
     { name = "rasterio", marker = "extra == 'render'", specifier = ">=1.3" },
     { name = "requests", specifier = ">=2.31" },
     { name = "rioxarray", marker = "extra == 'dem'", specifier = ">=0.15" },
@@ -2483,7 +2492,7 @@ requires-dist = [
     { name = "streamlit", marker = "extra == 'app'", specifier = ">=1.30" },
     { name = "xarray", marker = "extra == 'dem'", specifier = ">=2024.1" },
 ]
-provides-extras = ["dem", "render", "viz", "app", "dev"]
+provides-extras = ["dem", "render", "plate", "viz", "app", "dev"]
 
 [[package]]
 name = "watchdog"

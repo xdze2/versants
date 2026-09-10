@@ -819,6 +819,190 @@ def valley_plate(
     click.echo(str(Path(output).resolve()))
 
 
+@valley.command("diorama")
+@click.argument("slug")
+@click.option(
+    "--view",
+    default=None,
+    help="Named view block in valley.toml (default: the first one).",
+)
+@click.option(
+    "--valleys-dir",
+    type=click.Path(file_okay=False),
+    default="data/valleys",
+    show_default=True,
+    help="Directory holding <slug>/valley.toml.",
+)
+@click.option(
+    "--blender",
+    default="blender",
+    show_default=True,
+    envvar="VALLEESPYR_BLENDER",
+    help="Blender executable for the headless render.",
+)
+@click.option(
+    "--save-blend/--no-save-blend",
+    default=True,
+    show_default=True,
+    help="Write a .blend next to the PNG for hand-tweaking.",
+)
+@click.option(
+    "--skip-prep",
+    is_flag=True,
+    help="Reuse the existing derived/ files; only re-run the Blender render.",
+)
+@click.pass_context
+def valley_diorama(
+    ctx: click.Context,
+    slug: str,
+    view: str | None,
+    valleys_dir: str,
+    blender: str,
+    save_blend: bool,
+    skip_prep: bool,
+) -> None:
+    """Render a valley's catchment as a sun-lit isometric diorama PNG (Blender).
+
+    Reads ``<valleys-dir>/<slug>/valley.toml``. Unless ``--skip-prep``, it first
+    delineates the catchment, clips the DEM and writes ``derived/terrain.{npy,json}``
+    + ``derived/streams.json``; then it shells out to
+    ``blender --background --python scripts/render_valley.py``. The PNG lands at
+    ``<valleys-dir>/<slug>/<slug>_<view>_3d.png``, with a sibling ``.blend`` for
+    hand-tweaking unless ``--no-save-blend``.
+
+    Needs ``OPENTOPOGRAPHY_API_KEY`` set for the DEM fetch (cached after the
+    first run) and a Blender on ``PATH`` (or ``--blender`` / ``VALLEESPYR_BLENDER``).
+    """
+    import shutil
+    import subprocess
+    import tomllib
+    from pathlib import Path
+
+    valley_dir = Path(valleys_dir) / slug
+    toml_path = valley_dir / "valley.toml"
+    if not toml_path.exists():
+        raise click.ClickException(f"no valley.toml at {toml_path}")
+    cfg = tomllib.loads(toml_path.read_text("utf-8"))
+
+    views = cfg.get("view", {})
+    if not views:
+        raise click.ClickException("valley.toml has no [view.*] block")
+    if view is None:
+        view = next(iter(views))
+        click.echo(f"no --view; using {view!r}", err=True)
+    elif view not in views:
+        raise click.ClickException(
+            f"view {view!r} not in valley.toml (have: {', '.join(views)})"
+        )
+
+    if not skip_prep:
+        _diorama_prep(ctx, cfg, valley_dir)
+
+    for needed in ("terrain.npy", "terrain.json"):
+        if not (valley_dir / "derived" / needed).exists():
+            raise click.ClickException(
+                f"missing derived/{needed} — run without --skip-prep first"
+            )
+
+    blender_exe = shutil.which(blender) or blender
+    script = Path(__file__).resolve().parents[2] / "scripts" / "render_valley.py"
+    cmd = [
+        blender_exe,
+        "--background",
+        "--python",
+        str(script),
+        "--",
+        str(valley_dir),
+        "--view",
+        view,
+    ]
+    if not save_blend:
+        cmd.append("--no-save-blend")
+    click.echo(f"$ {' '.join(cmd)}", err=True)
+    proc = subprocess.run(cmd, check=False)
+    if proc.returncode != 0:
+        raise click.ClickException(f"blender exited {proc.returncode}")
+
+    out_png = valley_dir / f"{slug}_{view}_3d.png"
+    click.echo(f"wrote {out_png}", err=True)
+    click.echo(str(out_png.resolve()))
+
+
+def _diorama_prep(ctx: click.Context, cfg: dict, valley_dir: Path) -> None:
+    """Delineate the catchment and write derived/{terrain,streams}.* for Blender."""
+    from pathlib import Path
+
+    from shapely.geometry import mapping
+
+    from . import valley as valley_mod
+    from .render.terrain_export import export_streams, export_terrain
+
+    river_cfg = cfg.get("river", {})
+    catch_cfg = cfg.get("catchment", {})
+    terrain_cfg = cfg.get("terrain", {})
+
+    troncons = river_cfg.get("troncons")
+    if not troncons:
+        raise click.ClickException("valley.toml [river].troncons is required for prep")
+
+    rn = _load_river_network(ctx, str(troncons), None)
+    query = river_cfg.get("id") or river_cfg.get("name")
+    if not query:
+        raise click.ClickException("valley.toml needs [river].id or [river].name")
+    try:
+        river = valley_mod.resolve_river(rn, query)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    derived = valley_dir / "derived"
+    derived.mkdir(parents=True, exist_ok=True)
+    try:
+        poly, diag = valley_mod.delineate_river(
+            rn,
+            river.id,
+            dem_dir=derived,
+            demtype=catch_cfg.get("demtype", "COP30"),
+            acc_channel_cells=int(catch_cfg.get("acc_channel_cells", 1000)),
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_diag(diag)
+    if diag["course_inside_frac"] < 0.9:
+        click.echo(
+            f"warning: only {diag['course_inside_frac'] * 100:.0f}% of the river's course "
+            "falls inside the delineated catchment — the snap may be off",
+            err=True,
+        )
+
+    (derived / "catchment.geojson").write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": mapping(poly),
+                        "properties": {"name": river.name, "id": river.id, **{
+                            k: diag[k] for k in ("area_km2",) if k in diag
+                        }},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _npy, json_path = export_terrain(
+        poly,
+        Path(diag["dem_tif"]),
+        derived,
+        pad_cells=int(terrain_cfg.get("pad_cells", 6)),
+    )
+    meta = json.loads(json_path.read_text("utf-8"))
+    export_streams(rn.river_catchment_geojson(river.id), meta, derived)
+
+
 def _render_tree(node: dict, *, max_depth: int | None) -> list[str]:
     """ASCII tree lines: '├── Gave de Pau  (order 4, 8.2 km, 12 seg)'."""
     lines: list[str] = []

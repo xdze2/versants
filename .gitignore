@@ -4,6 +4,12 @@
 !/data/raw/.gitkeep
 !/data/processed/.gitkeep
 
+# per-valley: keep valley.toml + final PNG renders; drop the regenerable
+# derived/ step and the .blend (rebuilt from valley.toml on the next render)
+/data/valleys/*/derived/
+/data/valleys/*/*.blend
+*.blend1
+
 *.secret
 
 # python
