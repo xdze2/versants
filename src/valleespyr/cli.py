@@ -474,6 +474,246 @@ def rivers_show(
     click.echo("\n".join(lines))
 
 
+def _load_river_network(ctx: click.Context, from_file: str | None, bbox_s: str | None):
+    """Load a tronçon dump / bbox and roll it up into a :class:`RiverNetwork`."""
+    from .hydro import build_graph, build_river_network
+
+    gdf = _load_troncons_gdf(ctx, from_file, bbox_s)
+    return build_river_network(build_graph(gdf))
+
+
+def _echo_diag(diag: dict) -> None:
+    """Print delineation diagnostics to stderr as a compact aligned block."""
+    rows = [
+        ("area_km2", f"{diag['area_km2']:.2f}"),
+        ("snap_moved_cells", str(diag["snap_moved_cells"])),
+        ("depression_fill_frac", f"{diag['depression_fill_frac'] * 100:.2f}%"),
+        ("course_inside_frac", f"{diag['course_inside_frac'] * 100:.2f}%"),
+        ("n_cells", str(diag["n_cells"])),
+        ("dem_tif", str(diag["dem_tif"])),
+    ]
+    width = max(len(k) for k, _ in rows)
+    for key, value in rows:
+        click.echo(f"  {key:<{width}}  {value}", err=True)
+
+
+@cli.group()
+def valley() -> None:
+    """Pick a valley and build its 3D catchment render."""
+
+
+@valley.command("list")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option("--named-only", is_flag=True, help="Only rivers that carry a toponyme.")
+@click.option("--min-length-km", type=float, default=0.0, help="Hide rivers shorter than this.")
+@click.option("-n", "--limit", type=int, default=40, show_default=True, help="Max rows (0 = all).")
+@click.option("--json", "as_json", is_flag=True, help="Emit the rows as JSON.")
+@click.pass_context
+def valley_list(
+    ctx: click.Context,
+    from_file: str | None,
+    bbox_s: str | None,
+    named_only: bool,
+    min_length_km: float,
+    limit: int,
+    as_json: bool,
+) -> None:
+    """List the loaded rivers as render candidates, longest first.
+
+    A trimmed view aimed at picking a valley to render; ``hydro rivers list``
+    has the fuller column set (segments, tributaries, leaf state).
+    """
+    rn = _load_river_network(ctx, from_file, bbox_s)
+
+    rows = rn.summary()
+    if named_only:
+        rows = [r for r in rows if r["name"]]
+    if min_length_km:
+        rows = [r for r in rows if r["length_km"] >= min_length_km]
+    if limit:
+        rows = rows[:limit]
+
+    if as_json:
+        _dump(rows, None)
+        return
+
+    click.echo(
+        f"{len(rn)} rivers "
+        f"({sum(1 for x in rn if x.name)} named, {len(rn.roots())} roots); "
+        f"pick one for 'valley catchment' / 'valley render'",
+        err=True,
+    )
+    click.echo(f"{'length':>9}  {'ord':>3}  {'root':>4}  name / id")
+    for r in rows:
+        click.echo(
+            f"{r['length_km']:>7.1f}km  {str(r['max_order'] or ''):>3}  "
+            f"{('yes' if r['is_root'] else ''):>4}  {r['name'] or r['id']}"
+        )
+
+
+@valley.command("catchment")
+@click.argument("query")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option("--demtype", default="COP30", show_default=True, help="OpenTopography DEM type.")
+@click.option(
+    "--acc-channel-cells",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Flow-accumulation threshold (cells) that defines a channel for the snap.",
+)
+@click.option(
+    "--dem-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Cache the DEM tile here (default: fetch_dem's own cache location).",
+)
+@click.option("-o", "--output", default=None, help="Write GeoJSON here instead of stdout.")
+@click.pass_context
+def valley_catchment(
+    ctx: click.Context,
+    query: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    demtype: str,
+    acc_channel_cells: int,
+    dem_dir: str | None,
+    output: str | None,
+) -> None:
+    """Delineate one river's DEM catchment polygon and emit it as GeoJSON.
+
+    QUERY is a river name (case-insensitive substring) or a ``COURDEAU…`` id.
+    Needs ``OPENTOPOGRAPHY_API_KEY`` set (the DEM tile is fetched live).
+    """
+    from pathlib import Path
+
+    from shapely.geometry import mapping
+
+    from . import valley as valley_mod
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+    try:
+        river = valley_mod.resolve_river(rn, query)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        poly, diag = valley_mod.delineate_river(
+            rn,
+            river.id,
+            dem_dir=Path(dem_dir) if dem_dir else None,
+            demtype=demtype,
+            acc_channel_cells=acc_channel_cells,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_diag(diag)
+
+    feature = {
+        "type": "Feature",
+        "geometry": mapping(poly),
+        "properties": {
+            "name": river.name,
+            "id": river.id,
+            "area_km2": diag["area_km2"],
+            "source": "dem_" + demtype.lower(),
+        },
+    }
+    _dump({"type": "FeatureCollection", "features": [feature]}, output)
+
+
+@valley.command("render")
+@click.argument("query")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option("--demtype", default="COP30", show_default=True, help="OpenTopography DEM type.")
+@click.option(
+    "--acc-channel-cells",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Flow-accumulation threshold (cells) that defines a channel for the snap.",
+)
+@click.option(
+    "--dem-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Cache the DEM tile here (default: fetch_dem's own cache location).",
+)
+@click.option(
+    "--exaggeration",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Vertical exaggeration of the diorama (1.0 = true scale).",
+)
+@click.option(
+    "-o", "--output", required=True, help="Destination .html file (self-contained, no server)."
+)
+@click.pass_context
+def valley_render(
+    ctx: click.Context,
+    query: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    demtype: str,
+    acc_channel_cells: int,
+    dem_dir: str | None,
+    exaggeration: float,
+    output: str,
+) -> None:
+    """Delineate one river's catchment and bake it into a 3D diorama HTML file.
+
+    QUERY is a river name (case-insensitive substring) or a ``COURDEAU…`` id.
+    Needs ``OPENTOPOGRAPHY_API_KEY`` set. The output HTML is self-contained
+    (three.js from a CDN at view time; everything else baked in) — no server.
+    """
+    from pathlib import Path
+
+    from . import valley as valley_mod
+    from .render.diorama import build_diorama
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+    try:
+        river = valley_mod.resolve_river(rn, query)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    try:
+        poly, diag = valley_mod.delineate_river(
+            rn,
+            river.id,
+            dem_dir=Path(dem_dir) if dem_dir else None,
+            demtype=demtype,
+            acc_channel_cells=acc_channel_cells,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    _echo_diag(diag)
+    if diag["course_inside_frac"] < 0.9:
+        click.echo(
+            f"warning: only {diag['course_inside_frac'] * 100:.0f}% of the river's course "
+            "falls inside the delineated catchment — the snap may be off",
+            err=True,
+        )
+
+    streams_fc = rn.river_catchment_geojson(river.id)
+    build_diorama(
+        poly,
+        Path(diag["dem_tif"]),
+        streams_fc,
+        Path(output),
+        title=river.name or river.id,
+        z_exaggeration=exaggeration,
+    )
+    click.echo(f"wrote {output}", err=True)
+    click.echo(str(Path(output).resolve()))
+
+
 def _render_tree(node: dict, *, max_depth: int | None) -> list[str]:
     """ASCII tree lines: '├── Gave de Pau  (order 4, 8.2 km, 12 seg)'."""
     lines: list[str] = []

@@ -36,8 +36,9 @@ pip install -e ".[dev]"          # add ",app" for the browser navigator,
 ## CLI
 
 ```bash
-valleespyr wfs   --help    # explore a WFS source (BD TOPAGE / BD TOPO watersheds)
-valleespyr hydro --help    # stream-network topology + the river graph
+valleespyr wfs    --help   # explore a WFS source (BD TOPAGE / BD TOPO watersheds)
+valleespyr hydro  --help   # stream-network topology + the river graph
+valleespyr valley --help   # pick a river and build its 3D catchment render
 ```
 
 The WFS endpoint is a global option (`--wfs-endpoint`, IGN by default; Sandre
@@ -103,6 +104,28 @@ rivers and lets you pick one, see its course (orange) and catchment network
 sub-valley or walk back down via the breadcrumb. Downloads the current river's
 course or catchment as GeoJSON.
 
+### Valleys — pick one and render it
+
+`valley` chains the river graph to the DEM catchment tools and the 3D diorama.
+Pick a river with `valley list`, get its terrain-delineated catchment polygon
+with `valley catchment`, or go straight to a self-contained HTML render with
+`valley render`. `catchment` and `render` fetch a Copernicus DEM tile live and
+need `OPENTOPOGRAPHY_API_KEY` set.
+
+```bash
+# Render candidates in a loaded network (trimmed 'hydro rivers list')
+valleespyr valley list --from-file data/raw/troncon_hydrographique_gavarnie_sample.geojson \
+    --named-only --min-length-km 5
+
+# DEM catchment polygon for one river, as GeoJSON
+valleespyr valley catchment "Gave de Lutour" \
+    --from-file data/raw/troncon_hydrographique_pyrenees.parquet -o lutour_catchment.geojson
+
+# Full chain -> one self-contained .html (three.js from a CDN at view time, no server)
+valleespyr valley render "Gave de Lutour" \
+    --from-file data/raw/troncon_hydrographique_pyrenees.parquet --exaggeration 1.5 -o lutour_3d.html
+```
+
 ## Data model — what the layers actually contain
 
 Everything below is BD TOPO v3, sharing `cours_d_eau` ("watercourse") ids, which
@@ -155,7 +178,7 @@ Fields used: `liens_vers_cours_d_eau_principal` (join key), `cleabs`, `toponyme`
 ```
 config/            per-valley config (bbox, pour point, CRS, source URLs)
 src/valleespyr/
-  cli.py           click CLI  (groups: wfs, hydro)
+  cli.py           click CLI  (groups: wfs, hydro, valley)
   watershed.py     fetch / select watershed polygons; catchment_polygon() dissolve
   dump.py          bulk-download a layer (paged) to GeoJSON / GeoParquet / GPKG
   app.py           Streamlit river-graph navigator
