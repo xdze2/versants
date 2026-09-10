@@ -745,21 +745,47 @@ def valley_render(
 @click.option(
     "--hillshade",
     is_flag=True,
-    help="Add a sun-lit relief underlay (numpy hillshade + core/cast shadow, no Blender).",
+    help="Compute the four relief fields (hillshade, slope, core & cast shadow) "
+         "and drape them under the line work. All numpy, no Blender.",
 )
 @click.option(
-    "--sun-azimuth", type=float, default=315.0, show_default=True,
-    help="Sun compass bearing for --hillshade (0 = from the north, clockwise).",
+    "--style",
+    type=click.Choice(["ign", "real"]),
+    default="ign",
+    show_default=True,
+    help="Compositing preset for --hillshade. 'ign': NW 315deg / 45deg raking "
+         "light + a zenithal second light, no cast shadow — the map-legible "
+         "estompage (light from the top of the sheet, so the brain reads relief "
+         "right). 'real': lower sun, cast-shadow overlay on — physically honest "
+         "occlusion.",
 )
 @click.option(
-    "--sun-altitude", type=float, default=28.0, show_default=True,
-    help="Sun height above the horizon, degrees, for --hillshade. Low (25-32) "
-         "gives real cast shadows on true-scale 30 m terrain; high washes them out.",
+    "--sun-azimuth", type=float, default=None,
+    help="Override the preset sun compass bearing (0 = from the north, clockwise).",
+)
+@click.option(
+    "--sun-altitude", type=float, default=None,
+    help="Override the preset sun height above the horizon, degrees.",
+)
+@click.option(
+    "--zenith-weight", type=float, default=None,
+    help="Override the zenithal second-light blend: (1-w)*hillshade + w*(1-slope). "
+         "0 = single sun, ~0.55 = IGN.",
+)
+@click.option(
+    "--core-strength", type=float, default=None,
+    help="Override the core-shadow (terminator, n·L<=0) ink alpha. 0 = off; the "
+         "hillshade wash already darkens those faces.",
+)
+@click.option(
+    "--cast-strength", type=float, default=None,
+    help="Override the cast-shadow (projected, blocked upwind) overlay alpha. "
+         "0 = hillshade only.",
 )
 @click.option(
     "--shade-gain", type=float, default=1.0, show_default=True,
-    help="Cartographic slope exaggeration for the hillshade only (1.0 = faithful; "
-         "never affects the shadow geometry).",
+    help="Cartographic slope exaggeration for the hillshade/slope fields only "
+         "(1.0 = faithful; never affects the shadow geometry).",
 )
 @click.option("-o", "--output", required=True, help="Destination .svg file.")
 @click.pass_context
@@ -775,8 +801,12 @@ def valley_plate(
     no_png: bool,
     refresh_osm: bool,
     hillshade: bool,
-    sun_azimuth: float,
-    sun_altitude: float,
+    style: str,
+    sun_azimuth: float | None,
+    sun_altitude: float | None,
+    zenith_weight: float | None,
+    core_strength: float | None,
+    cast_strength: float | None,
     shade_gain: float,
     output: str,
 ) -> None:
@@ -788,18 +818,42 @@ def valley_plate(
     sibling PNG unless ``--no-png``). Needs ``OPENTOPOGRAPHY_API_KEY`` set; the
     DEM tile and the Overpass response are both cached under ``data/raw``.
 
-    With ``--hillshade`` the DEM is also draped in a sun-lit relief wash: a
-    faint Lambert hillshade (which already carries the self-/core shadow on the
-    lee of every ridge) plus a crisp *cast* shadow overlay where sun-facing
-    ground is blocked by higher terrain upwind. All numpy — no Blender
-    subprocess. ``--sun-azimuth`` / ``--sun-altitude`` place the light; the
-    shadow geometry uses the true DEM at the true sun altitude.
+    With ``--hillshade`` the four relief fields are computed once (hillshade,
+    slope, core shadow, cast shadow — all numpy, no Blender) and ``--style``
+    picks how they are composited:
+
+    * ``ign`` (default) — the map convention. NW raking light (315deg) at 45deg
+      blended with a zenithal second light (``1 - slope``) so lee slopes stay
+      modelled, and *no* cast shadow. The sun sits at the top of the sheet
+      (= north on a north-up plate) because the eye reads "light from above"
+      and inverts relief lit from below; not physically realistic, and it does
+      not need to be.
+    * ``real`` — a lower single sun with the cast-shadow overlay on: physically
+      honest occlusion (true DEM, true altitude). Better suited to a rotatable
+      3-D view than a fixed north-up plate.
+
+    Any of ``--sun-azimuth``, ``--sun-altitude``, ``--zenith-weight``,
+    ``--core-strength``, ``--cast-strength`` override the preset.
     """
     from pathlib import Path
 
     from . import valley as valley_mod
     from .render.plate import build_plate
     from .sources.osm import fetch_osm_features
+
+    # --- relief style preset (individual --flags override) ---------------
+    presets = {
+        # NW sun high, zenithal fill, estompage only
+        "ign": dict(azimuth=315.0, altitude=45.0, zenith=0.55, core=0.0, cast=0.0),
+        # low single sun, projected-shadow occlusion shown
+        "real": dict(azimuth=315.0, altitude=28.0, zenith=0.0, core=0.0, cast=0.62),
+    }
+    p = presets[style]
+    sun_az = p["azimuth"] if sun_azimuth is None else sun_azimuth
+    sun_alt = p["altitude"] if sun_altitude is None else sun_altitude
+    zen_w = p["zenith"] if zenith_weight is None else zenith_weight
+    core_s = p["core"] if core_strength is None else core_strength
+    cast_s = p["cast"] if cast_strength is None else cast_strength
 
     rn = _load_river_network(ctx, from_file, bbox_s)
     try:
@@ -843,9 +897,19 @@ def valley_plate(
         subtitle=subtitle,
         crs=crs,
         write_png=not no_png,
-        hillshade=(sun_azimuth, sun_altitude) if hillshade else None,
+        hillshade=(sun_az, sun_alt) if hillshade else None,
         shade_gain=shade_gain,
+        zenith_weight=zen_w,
+        core_strength=core_s,
+        cast_strength=cast_s,
     )
+    if hillshade:
+        click.echo(
+            f"relief: style={style} sun az{sun_az:g}/alt{sun_alt:g} "
+            f"zenith_weight={zen_w:g} core_strength={core_s:g} "
+            f"cast_strength={cast_s:g}",
+            err=True,
+        )
     for p in written:
         click.echo(f"wrote {p}", err=True)
     click.echo(str(Path(output).resolve()))

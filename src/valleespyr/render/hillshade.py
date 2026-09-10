@@ -1,27 +1,42 @@
-"""Sun-lit relief for a heightmap — hillshade, core shadow, cast shadow. Pure numpy.
+"""Sun-lit relief for a heightmap — four independent scalar fields. Pure numpy.
 
 Blender's ray tracer is overkill for draping one directional light over a DEM:
-there is no reflection, no refraction, no indirect bounce to solve. Three effects
-carry the relief on a map, and they are worth keeping apart:
+there is no reflection, no refraction, no indirect bounce to solve. What a relief
+map is really made of is a handful of *separable* quantities, each answering a
+different question about a pixel:
 
-* **hillshade** — Lambert shading, ``max(0, dot(surface_normal, sun))``. Cheap,
-  local, gives the soft modelling of every slope.
-* **core shadow** (self-shadow / terminator) — a face turned away from the sun,
-  ``n · L <= 0``. Also purely local; it is exactly where the hillshade has
-  already gone to zero, so on a map it needs no extra ink — the shading band on
-  the lee of every ridge *is* the core shadow.
+* **hillshade** — ``max(0, n · L)``. Depends on the surface normal **and** the
+  sun direction: how directly does this face catch the raking light? Carries
+  aspect × sun altitude. This is the soft modelling.
+* **slope** — steepness alone, ``arctan(‖∇z‖) / (π/2)`` in ``[0, 1]``. Depends
+  on the normal only, **no direction**: 0 on the flats, 1 at the vertical. The
+  ingredient for a zenithal "second sun" or a plain slope tint.
+* **core shadow** (self-shadow / terminator) — ``n · L ≤ 0``. A face turned away
+  from the sun. Local, aspect-only, no ray march. On a shaded map this is
+  exactly where the hillshade has already gone to black.
 * **cast shadow** (projected / drop shadow) — a face that *does* point toward the
   sun but is blocked by higher ground upwind. Non-local: a 1-D horizon march per
-  pixel along the sun's bearing. This is the part that actually needs a raytrace,
-  and the part that carries new information on a plate — "low sun, hidden behind
-  that headwall", not just "this slope faces away".
+  pixel along the sun's bearing. The part that actually needs a raytrace, and
+  the part that carries new information on a plate — "low sun, hidden behind that
+  headwall", not just "this slope faces away".
+
+:func:`shaded_relief` returns all four as separate arrays. Combining them is a
+rendering choice, not a compute-time one: :func:`compose_relief` does the IGN
+"deux soleils" blend (one raking light + one zenithal) from ``hillshade`` and
+``slope``; a caller is free to weight them differently, tint by ``slope``, or ink
+``core_shadow`` in its own colour.
 
 Geometry note: the ray march uses the **true** DEM and the **true** sun altitude.
 There is no vertical exaggeration here — a stretched Z against a fixed sun angle
 is the shadow pattern of a sun that does not exist. Slope *shading* may be
-punched up for legibility (``shade_gain`` on :func:`hillshade`, a cartographic
-convention, off by default), but that stylistic gain never touches the shadow
-passes.
+punched up for legibility (``shade_gain``, a cartographic convention, off by
+default), but that stylistic gain never touches the shadow passes.
+
+Lighting note: on a north-up *plate* the light is placed at the top of the sheet
+(NW ~315°), which is not where the sun is — but the eye assumes light from above
+and inverts relief lit from below, so the map convention wins over realism. A
+rotatable *3-D* view has no such constraint; there a physically-placed sun is
+fine.
 
 Everything is ``numpy`` only (no rasterio / bpy); callers pass the DEM as a plain
 array plus its cell size in metres.
@@ -41,9 +56,11 @@ import numpy as np
 __all__ = [
     "sun_vector",
     "hillshade",
+    "slope",
     "core_shadow",
     "cast_shadows",
     "shaded_relief",
+    "compose_relief",
 ]
 
 
@@ -67,18 +84,21 @@ def hillshade(
     *,
     shade_gain: float = 1.0,
 ) -> np.ndarray:
-    """Lambertian shading of ``dem`` under directional light ``sun``.
+    """Directional Lambert shading of ``dem``: ``max(0, n · L)`` in ``[0, 1]``.
 
     ``dx`` / ``dy`` are the cell size in metres (east and north). ``shade_gain``
     multiplies the horizontal gradient before the normal is formed — a purely
     cartographic slope exaggeration for legibility (Swiss-style maps often shade
     as if slopes were ~1.3–1.5× steeper). It is **not** a vertical exaggeration
     of the terrain and has no bearing on the shadow passes; leave it at 1.0 for
-    a physically faithful shade. Returns a ``[0, 1]`` float array, NaN where
-    ``dem`` is NaN.
+    a physically faithful shade.
 
-    The surface normal is ``(-dz/dx, -dz/dy, 1)`` normalised; ``dz/dy`` uses the
-    north-up sign (row 0 is north, so ``d/drow`` is ``-d/dnorth``).
+    This is the raking light *only* — no zenithal component. For IGN's "deux
+    soleils" estompage, blend this with :func:`slope` via :func:`compose_relief`.
+
+    Returns a ``[0, 1]`` float array, NaN where ``dem`` is NaN. The surface
+    normal is ``(-dz/dx, -dz/dy, 1)`` normalised; ``dz/dy`` uses the north-up
+    sign (row 0 is north, so ``d/drow`` is ``-d/dnorth``).
     """
     z = dem.astype("float64")
     # np.gradient over a NaN-padded array spreads NaN one cell into the interior;
@@ -97,9 +117,39 @@ def _hillshade_prefilled(
 ) -> np.ndarray:
     """``hillshade`` core, given the already-NaN-filled DEM."""
     nx, ny, nz = _surface_normal(filled, dx, dy, shade_gain)
-    shade = nx * sun[0] + ny * sun[1] + nz * sun[2]
-    shade = np.clip(shade, 0.0, 1.0)
-    return np.where(valid, shade, np.nan)
+    ndl = np.clip(nx * sun[0] + ny * sun[1] + nz * sun[2], 0.0, 1.0)
+    return np.where(valid, ndl, np.nan)
+
+
+def slope(
+    dem: np.ndarray,
+    dx: float,
+    dy: float,
+    *,
+    shade_gain: float = 1.0,
+) -> np.ndarray:
+    """Steepness of ``dem`` as ``arctan(‖∇z‖) / (π/2)`` in ``[0, 1]``.
+
+    Direction-free: 0 on level ground, → 1 approaching vertical. This is the
+    ingredient for a zenithal light (``1 - slope`` = a straight-down "sun":
+    bright flat, dark steep, aspect ignored) or a plain slope tint. ``shade_gain``
+    steepens it the same way it steepens the hillshade. NaN where ``dem`` is NaN.
+    """
+    filled = _fill_nan(dem.astype("float64"))
+    return _slope_prefilled(filled, dx, dy, np.isfinite(dem), shade_gain)
+
+
+def _slope_prefilled(
+    filled: np.ndarray,
+    dx: float,
+    dy: float,
+    valid: np.ndarray,
+    shade_gain: float = 1.0,
+) -> np.ndarray:
+    gr, gc = np.gradient(filled)
+    grad = np.hypot(shade_gain * gc / dx, shade_gain * gr / dy)
+    s = np.arctan(grad) / (np.pi / 2.0)
+    return np.where(valid, np.clip(s, 0.0, 1.0), np.nan)
 
 
 def _surface_normal(
@@ -108,7 +158,7 @@ def _surface_normal(
     """Unit surface normal components ``(nx, ny, nz)`` for a NaN-free grid.
 
     ``nz > 0`` everywhere. ``shade_gain`` steepens the apparent slope (shading
-    only). Used by both the hillshade and the core-shadow test.
+    only). Used by the hillshade and the core-shadow test.
     """
     gr, gc = np.gradient(filled)
     dz_dx = shade_gain * gc / dx          # east
@@ -129,7 +179,7 @@ def core_shadow(
     The self-shadow / terminator — a local test on the surface normal, no ray
     march. On a shaded map this is exactly the region the hillshade has already
     driven to black, so it usually needs no separate ink; it is returned so a
-    caller can subtract it from the cast-shadow mask.
+    caller can subtract it from the cast-shadow mask or ink it deliberately.
     """
     filled = _fill_nan(dem.astype("float64"))
     nx, ny, nz = _surface_normal(filled, dx, dy)
@@ -239,24 +289,23 @@ def shaded_relief(
     sun_azimuth: float,
     sun_altitude: float,
     shade_gain: float = 1.0,
-    ambient: float = 0.35,
     soft_px: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Hillshade plus the two shadow masks, kept apart.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """The four separable relief fields, on the DEM grid, NaN outside the DEM.
 
-    Returns ``(hillshade, core_shadow, cast_shadow)`` on the DEM grid:
+    Returns ``(hillshade, slope, core_shadow, cast_shadow)``:
 
-    * ``hillshade`` — ``[0, 1]`` Lambert shade, NaN outside the DEM;
+    * ``hillshade`` — ``[0, 1]`` directional Lambert (aspect × sun altitude);
+    * ``slope`` — ``[0, 1]`` steepness, direction-free (``arctan(‖∇z‖)``);
     * ``core_shadow`` — float ``[0, 1]`` (after any ``soft_px`` blur), 1 where
-      the surface faces away from the sun;
+      the surface faces away from the sun (``n·L ≤ 0``);
     * ``cast_shadow`` — float ``[0, 1]``, 1 where a *sun-facing* pixel is blocked
       by higher ground upwind. Core-shadowed pixels are removed, so this is the
-      projected shadow alone — the part the hillshade does not already show.
+      projected shadow alone.
 
-    ``shade_gain`` steepens the shading only (cartographic; 1.0 = faithful).
-    ``ambient`` is unused by the split output and kept for signature stability
-    with callers that composited a single brightness field; compose the layers
-    downstream instead.
+    Nothing is combined here. ``shade_gain`` steepens the ``hillshade`` and
+    ``slope`` fields only (cartographic; 1.0 = faithful) and never the shadow
+    geometry. Use :func:`compose_relief` for the IGN "deux soleils" blend.
     """
     sun = sun_vector(sun_azimuth, sun_altitude)
     z = dem.astype("float64")
@@ -264,6 +313,7 @@ def shaded_relief(
     filled = _fill_nan(z)                 # one fill shared by every pass
 
     hs = _hillshade_prefilled(filled, dx, dy, sun, valid, shade_gain)
+    sl = _slope_prefilled(filled, dx, dy, valid, shade_gain)
 
     nx, ny, nz = _surface_normal(filled, dx, dy)
     ndl = nx * sun[0] + ny * sun[1] + nz * sun[2]
@@ -275,12 +325,33 @@ def shaded_relief(
     core_f = core.astype("float64")
     cast_f = cast.astype("float64")
     if soft_px > 0:
-        core_f = np.where(valid, _box_blur(core_f, soft_px), 0.0)
-        cast_f = np.where(valid, _box_blur(cast_f, soft_px), 0.0)
+        core_f = _box_blur(core_f, soft_px)
+        cast_f = _box_blur(cast_f, soft_px)
 
     core_f = np.where(valid, core_f, np.nan)
     cast_f = np.where(valid, cast_f, np.nan)
-    return hs, core_f, cast_f
+    return hs, sl, core_f, cast_f
+
+
+def compose_relief(
+    hillshade_arr: np.ndarray,
+    slope_arr: np.ndarray,
+    *,
+    zenith_weight: float = 0.0,
+) -> np.ndarray:
+    """Blend a raking hillshade with a zenithal light — IGN's "deux soleils".
+
+    ``(1 - w) * hillshade + w * (1 - slope)``. The zenithal term ``1 - slope``
+    is a straight-down light: bright on the flats, dark on the steeps, aspect
+    ignored. Mixing it in keeps slopes facing away from the raking light from
+    collapsing to solid black. ``w = 0`` returns the hillshade untouched;
+    ``w ≈ 0.5`` is the usual estompage. NaN is preserved.
+    """
+    w = float(np.clip(zenith_weight, 0.0, 1.0))
+    if w == 0.0:
+        return hillshade_arr
+    out = (1.0 - w) * hillshade_arr + w * (1.0 - slope_arr)
+    return np.clip(out, 0.0, 1.0)
 
 
 # --------------------------------------------------------------------- helpers

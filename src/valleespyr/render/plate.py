@@ -52,15 +52,17 @@ class PlateLayers:
     catchment: gpd.GeoSeries          # single-row, the clip boundary
     contours_minor: list[np.ndarray]
     contours_index: list[np.ndarray]
-    # optional sun-lit relief underlay, all in ``crs`` metres on one grid, ready
-    # for ``ax.imshow`` at ``relief_extent``. ``None`` unless ``hillshade=`` was
-    # passed. ``relief`` is the soft Lambert hillshade (0..1). ``core_shadow`` is
-    # the local self-shadow (n·L ≤ 0) — the hillshade already blacks this out, so
-    # the plate does not re-ink it; it is here for completeness / debugging.
-    # ``cast_shadow`` is the *projected* shadow alone (sun-facing ground blocked
-    # by higher terrain upwind, core-shadow removed) — the crisp overlay that
-    # carries information the hillshade does not.
+    # optional sun-lit relief underlay: four separable [0,1] fields on one grid
+    # in ``crs`` metres, ready for ``ax.imshow`` at ``relief_extent``. ``None``
+    # unless ``hillshade=`` was passed. See :mod:`valleespyr.render.hillshade`:
+    #   relief       — directional Lambert hillshade (aspect × sun altitude)
+    #   slope        — steepness, direction-free (for a zenithal 2nd light)
+    #   core_shadow  — n·L ≤ 0, faces turned from the sun (the hillshade already
+    #                  blacks this out; kept for a deliberate ink or debugging)
+    #   cast_shadow  — projected shadow alone (blocked by higher ground upwind,
+    #                  core removed) — the overlay carrying new information
     relief: np.ndarray | None
+    slope: np.ndarray | None
     core_shadow: np.ndarray | None
     cast_shadow: np.ndarray | None
     relief_extent: tuple[float, float, float, float] | None
@@ -143,17 +145,16 @@ def _shaded_relief_layer(
     sun: tuple[float, float],
     shade_gain: float,
 ) -> tuple[
-    np.ndarray, np.ndarray, np.ndarray, tuple[float, float, float, float]
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    tuple[float, float, float, float],
 ]:
-    """Sun-lit relief for the clipped DEM, warped to ``crs``.
+    """The four relief fields for the clipped DEM, warped to ``crs``.
 
-    Returns ``(hillshade, core_shadow, cast_shadow, extent)`` on one grid, each
-    ``[0, 1]`` with NaN outside the divide, plus the ``imshow`` extent in
-    ``crs``. ``core_shadow`` is the local self-shadow (already carried by the
-    hillshade); ``cast_shadow`` is the projected shadow with the core removed —
-    the crisp part :func:`_draw_relief` overlays. The shadow passes use the true
-    DEM and true sun altitude; ``shade_gain`` steepens the hillshade only
-    (cartographic, 1.0 = faithful).
+    Returns ``(hillshade, slope, core_shadow, cast_shadow, extent)`` on one grid,
+    each ``[0, 1]`` with NaN outside the divide, plus the ``imshow`` extent in
+    ``crs``. Nothing is combined — the renderer composes them. The shadow passes
+    use the true DEM and true sun altitude; ``shade_gain`` steepens the
+    hillshade and slope fields only (cartographic, 1.0 = faithful).
 
     Cell size in metres comes from the pixel size and the metres-per-degree at
     this latitude when the DEM is geographic. Arrays are masked to
@@ -178,7 +179,7 @@ def _shaded_relief_layer(
     else:  # already metric
         dx, dy = px, py
 
-    hs, core, cast = shaded_relief(
+    hs, sl, core, cast = shaded_relief(
         band, dx=dx, dy=dy,
         sun_azimuth=sun[0], sun_altitude=sun[1],
         shade_gain=shade_gain, soft_px=1.0,
@@ -188,6 +189,7 @@ def _shaded_relief_layer(
         [catchment_polygon], out_shape=band.shape, transform=transform, invert=False
     )
     hs = np.where(outside, np.nan, hs)
+    sl = np.where(outside, np.nan, sl)
     core = np.where(outside, np.nan, core)
     cast = np.where(outside, np.nan, cast)
 
@@ -210,7 +212,7 @@ def _shaded_relief_layer(
     y1 = dst_transform.f
     x1 = x0 + dw * dst_transform.a
     y0 = y1 + dh * dst_transform.e
-    return _warp(hs), _warp(core), _warp(cast), (x0, x1, y0, y1)
+    return _warp(hs), _warp(sl), _warp(core), _warp(cast), (x0, x1, y0, y1)
 
 
 # ------------------------------------------------------------------------- prepare
@@ -254,11 +256,12 @@ def prepare_layers(
     French Pyrénées; pass a UTM CRS for a wider basin) and clipped to the
     catchment outline.
 
-    Pass ``hillshade=(sun_azimuth_deg, sun_altitude_deg)`` to also compute a
-    sun-lit relief underlay (Lambert hillshade + core/cast shadow split, all
-    numpy — no Blender). The shadow passes use the true DEM and true sun
-    altitude; ``shade_gain`` steepens the hillshade only, a cartographic slope
-    exaggeration for legibility (1.0 = physically faithful).
+    Pass ``hillshade=(sun_azimuth_deg, sun_altitude_deg)`` to also compute the
+    four relief fields (hillshade, slope, core shadow, cast shadow — all numpy,
+    no Blender); :func:`draw_plate` composes them per style. The shadow passes
+    use the true DEM and true sun altitude; ``shade_gain`` steepens the
+    hillshade and slope fields only, a cartographic slope exaggeration for
+    legibility (1.0 = physically faithful).
     """
     catch_ll = gpd.GeoSeries([catchment_polygon], crs="EPSG:4326")
     catch = catch_ll.to_crs(crs)
@@ -293,13 +296,15 @@ def prepare_layers(
             x, y = tf(poly[:, 0], poly[:, 1])
             bucket.append(np.column_stack([x, y]))
 
-    # --- optional sun-lit relief underlay --------------------------------
+    # --- optional sun-lit relief underlay (four separable fields) -------
     relief: np.ndarray | None = None
+    relief_slope: np.ndarray | None = None
     core_shadow: np.ndarray | None = None
     cast_shadow: np.ndarray | None = None
     relief_extent: tuple[float, float, float, float] | None = None
     if hillshade is not None:
-        relief, core_shadow, cast_shadow, relief_extent = _shaded_relief_layer(
+        (relief, relief_slope, core_shadow, cast_shadow,
+         relief_extent) = _shaded_relief_layer(
             band, transform, dem_crs, crs, catchment_polygon,
             hillshade, shade_gain,
         )
@@ -321,6 +326,7 @@ def prepare_layers(
         contours_minor=minor,
         contours_index=index,
         relief=relief,
+        slope=relief_slope,
         core_shadow=core_shadow,
         cast_shadow=cast_shadow,
         relief_extent=relief_extent,
@@ -457,45 +463,54 @@ def _draw_relief(
     layers: PlateLayers,
     *,
     hillshade_strength: float = 0.28,
+    zenith_weight: float = 0.0,
+    core_strength: float = 0.0,
     cast_strength: float = 0.62,
 ) -> None:
-    """Paint the relief under the line work.
+    """Compose the four relief fields into washes under the line work.
 
-    Two ideas, kept separate:
+    All four arrays share one grid + extent; each knob picks how much of that
+    field reaches the paper:
 
-    * The diffuse Lambert **hillshade** goes down faint (``hillshade_strength`` =
-      alpha of its darkest slope) — enough to model every slope, low enough not
-      to compete with the contours. It *already* carries the **core shadow**
-      (the lee of each ridge is where ``n·L`` hits zero), so that gets no extra
-      ink.
-    * The **cast shadow** — sun-facing ground blocked by higher terrain upwind,
-      with the core shadow removed — goes on top at ``cast_strength`` in a
-      cooler slate ink. This is the part the hillshade cannot show: it marks
-      "low sun, hidden behind that headwall", and because it is a crisp,
-      bounded shape it stays legible against the isolines.
+    * **hillshade wash** — the raking Lambert light, optionally blended with a
+      zenithal second light (``zenith_weight``, ``1 - slope``: bright flat, dark
+      steep, IGN "deux soleils") so lee slopes stay modelled instead of going
+      black. Laid down at ``hillshade_strength`` alpha in a warm neutral.
+    * **core-shadow ink** (``core_strength``) — the ``n·L ≤ 0`` faces. Off by
+      default: the hillshade wash already darkens them. Turn it on to mark the
+      sun/shade line as its own edge.
+    * **cast-shadow ink** (``cast_strength``) — the projected shadow alone
+      (sun-facing ground blocked upwind, core removed), a cool slate on top. A
+      crisp bounded shape, so it stays legible against the isolines.
     """
     import numpy as _np
     from matplotlib.colors import to_rgb
+
+    from .hillshade import compose_relief
 
     x0, x1, y0, y1 = layers.relief_extent
     common = dict(extent=(x0, x1, y0, y1), origin="upper",
                   interpolation="bilinear", clip_on=True)
 
-    if layers.relief is not None:
-        r = _np.clip(layers.relief, 0.0, 1.0)
-        shade = _np.where(_np.isfinite(r), 1.0 - r, 0.0)
-        rgba = _np.zeros((*shade.shape, 4), dtype=float)
-        rgba[..., :3] = to_rgb("#6b6152")          # warm neutral
-        rgba[..., 3] = shade * hillshade_strength
-        ax.imshow(rgba, zorder=0.4, **common)
+    def _wash(mask: _np.ndarray, hex_color: str, strength: float, zorder: float):
+        m = _np.where(_np.isfinite(mask), _np.clip(mask, 0.0, 1.0), 0.0)
+        rgba = _np.zeros((*m.shape, 4), dtype=float)
+        rgba[..., :3] = to_rgb(hex_color)
+        rgba[..., 3] = m * strength
+        ax.imshow(rgba, zorder=zorder, **common)
 
-    if layers.cast_shadow is not None:
-        s = _np.clip(layers.cast_shadow, 0.0, 1.0)
-        s = _np.where(_np.isfinite(s), s, 0.0)
-        rgba = _np.zeros((*s.shape, 4), dtype=float)
-        rgba[..., :3] = to_rgb("#39414d")          # cool slate, reads as shadow
-        rgba[..., 3] = s * cast_strength
-        ax.imshow(rgba, zorder=0.5, **common)
+    if layers.relief is not None:
+        shade = compose_relief(
+            layers.relief, layers.slope, zenith_weight=zenith_weight
+        )
+        # darkness = 1 - brightness; warm neutral ink
+        _wash(1.0 - shade, "#6b6152", hillshade_strength, 0.4)
+
+    if layers.core_shadow is not None and core_strength > 0:
+        _wash(layers.core_shadow, "#4d4a44", core_strength, 0.45)
+
+    if layers.cast_shadow is not None and cast_strength > 0:
+        _wash(layers.cast_shadow, "#39414d", cast_strength, 0.5)
 
 
 def draw_plate(
@@ -505,11 +520,16 @@ def draw_plate(
     subtitle: str = "",
     write_png: bool = True,
     dpi: int = 200,
+    zenith_weight: float = 0.0,
+    core_strength: float = 0.0,
+    cast_strength: float = 0.62,
 ) -> list[Path]:
     """Paint a :class:`PlateLayers` bundle to ``out_svg`` (+ a sibling ``.png``).
 
     Returns the paths written. ``subtitle`` goes in the title block under the
-    valley name (e.g. an area / elevation-range string).
+    valley name (e.g. an area / elevation-range string). The relief knobs
+    (``zenith_weight``, ``core_strength``, ``cast_strength``) are passed straight
+    to :func:`_draw_relief`; they do nothing unless ``layers`` carries a relief.
     """
     import matplotlib
 
@@ -533,7 +553,10 @@ def draw_plate(
 
     # --- sun-lit relief underlay (optional, below everything) -------------
     if layers.relief is not None and layers.relief_extent is not None:
-        _draw_relief(ax, layers)
+        _draw_relief(
+            ax, layers, zenith_weight=zenith_weight,
+            core_strength=core_strength, cast_strength=cast_strength,
+        )
 
     # --- fills (bottom) ----------------------------------------------------
     _draw_polys(ax, layers.glaciers, **_STYLE["glacier_fill"], zorder=1)
@@ -772,17 +795,27 @@ def build_plate(
     write_png: bool = True,
     hillshade: tuple[float, float] | None = None,
     shade_gain: float = 1.0,
+    zenith_weight: float = 0.0,
+    core_strength: float = 0.0,
+    cast_strength: float = 0.62,
 ) -> list[Path]:
     """Prepare + draw a valley topo plate in one call. Returns the paths written.
 
-    ``hillshade=(sun_azimuth, sun_altitude)`` adds the sun-lit relief underlay;
-    ``shade_gain`` steepens the hillshade only (1.0 = physically faithful).
+    ``hillshade=(sun_azimuth, sun_altitude)`` computes the four relief fields;
+    ``shade_gain`` steepens the hillshade/slope fields only (1.0 = faithful).
+    The compositing knobs — ``zenith_weight`` (IGN "deux soleils" blend),
+    ``core_strength`` (ink the terminator), ``cast_strength`` (projected-shadow
+    overlay) — choose how those fields reach the paper.
     """
     layers = prepare_layers(
         catchment_polygon, dem_tif, streams_fc, osm, title=title, crs=crs,
         hillshade=hillshade, shade_gain=shade_gain,
     )
-    return draw_plate(layers, out_svg, subtitle=subtitle, write_png=write_png)
+    return draw_plate(
+        layers, out_svg, subtitle=subtitle, write_png=write_png,
+        zenith_weight=zenith_weight, core_strength=core_strength,
+        cast_strength=cast_strength,
+    )
 
 
 __all__ = ["PlateLayers", "prepare_layers", "draw_plate", "build_plate"]

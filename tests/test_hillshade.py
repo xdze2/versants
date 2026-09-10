@@ -1,4 +1,4 @@
-"""Analytic checks for the numpy hillshade + core/cast-shadow split."""
+"""Analytic checks for the four separable relief fields."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import numpy as np
 
 from valleespyr.render.hillshade import (
     cast_shadows,
+    compose_relief,
     core_shadow,
     hillshade,
     shaded_relief,
+    slope,
     sun_vector,
 )
 
@@ -31,8 +33,24 @@ def test_flat_dem_no_shadows_uniform_hillshade():
     hs = hillshade(dem, dx=30.0, dy=30.0, sun=sun)
     # flat ground: normal is +z, so shade == sin(altitude)
     assert np.allclose(hs, np.sin(np.radians(30.0)), atol=1e-9)
+    assert np.allclose(slope(dem, 30.0, 30.0), 0.0, atol=1e-12)  # flat -> slope 0
     assert not cast_shadows(dem, 30.0, 30.0, sun).any()
     assert not core_shadow(dem, 30.0, 30.0, sun).any()
+
+
+def test_slope_is_directionless_and_zero_to_one():
+    # a slope tilted the same amount up the east and up the north: slope must be
+    # identical for both, since it ignores aspect.
+    n = 30
+    east = np.tile(np.arange(n) * 10.0, (n, 1))
+    north = east.T
+    se = slope(east, 20.0, 20.0)
+    sn = slope(north, 20.0, 20.0)
+    assert np.allclose(se[2:-2, 2:-2].mean(), sn[2:-2, 2:-2].mean(), rtol=1e-6)
+    assert 0.0 <= np.nanmin(se) and np.nanmax(se) <= 1.0
+    # a 10 m rise per 20 m cell -> arctan(0.5) / (pi/2)
+    expect = np.arctan(0.5) / (np.pi / 2)
+    assert np.isclose(se[n // 2, n // 2], expect, rtol=1e-6)
 
 
 def test_vertical_step_shadow_length_matches_geometry():
@@ -50,29 +68,27 @@ def test_vertical_step_shadow_length_matches_geometry():
     sun = sun_vector(90.0, alpha)
     shadow = cast_shadows(dem, dx=cell, dy=cell, sun=sun)
 
-    # expected westward reach in cells, from the foot of the wall
     reach_cells = (h / np.tan(np.radians(alpha))) / cell
-    lo = edge - int(reach_cells) + 1   # firmly inside the shadow
-    hi = edge - int(reach_cells) - 2   # firmly in sunlight (may be < 0)
+    lo = edge - int(reach_cells) + 1
+    hi = edge - int(reach_cells) - 2
 
     row = rows // 2
-    assert shadow[row, edge - 1]           # right at the wall foot: shadowed
-    assert shadow[row, lo]                 # within the predicted reach
+    assert shadow[row, edge - 1]
+    assert shadow[row, lo]
     if hi >= 0:
-        assert not shadow[row, hi]         # beyond it: lit
-    # the plateau top faces the sun and is never self-shadowed here
+        assert not shadow[row, hi]
     assert not shadow[:, edge:].any()
 
 
-def test_no_vertical_exaggeration_knob_on_the_shadow_march():
-    # cast_shadows takes only geometry + sun; there is no z_exag / gain to slip
-    # a fictional sun angle in through. The shadow of a wall must be exactly
-    # h / tan(alpha) long, full stop.
+def test_no_exaggeration_knob_on_the_shadow_march():
     import inspect
 
     sig = inspect.signature(cast_shadows)
     assert "z_exag" not in sig.parameters
     assert "shade_gain" not in sig.parameters
+    # shaded_relief no longer composites — no zenith_weight there either
+    assert "zenith_weight" not in inspect.signature(shaded_relief).parameters
+    assert "zenith_weight" not in inspect.signature(hillshade).parameters
 
     rows, cols = 12, 260
     cell = 5.0
@@ -80,89 +96,131 @@ def test_no_vertical_exaggeration_knob_on_the_shadow_march():
     alpha = 40.0
     edge = 200
     dem = np.zeros((rows, cols))
-    dem[:, edge:] = h  # high ground on the east; eastern sun -> shadow goes west
+    dem[:, edge:] = h
     shadow = cast_shadows(dem, cell, cell, sun_vector(90.0, alpha))
     reach = int(round((h / np.tan(np.radians(alpha))) / cell))
-    assert 0 < edge - reach - 5  # shadow tip fits on the low ground
+    assert 0 < edge - reach - 5
     row = rows // 2
-    assert shadow[row, edge - reach + 1]   # inside the shadow
-    assert shadow[row, edge - 1]           # at the wall foot
-    assert not shadow[row, edge - reach - 3]  # past the tip: lit
+    assert shadow[row, edge - reach + 1]
+    assert shadow[row, edge - 1]
+    assert not shadow[row, edge - reach - 3]
 
 
 def test_core_vs_cast_are_disjoint_and_named_right():
-    # a single ridge: two facing ramps meeting at a crest running N-S.
     rows, cols = 30, 121
     crest = 60
     x = np.abs(np.arange(cols) - crest)
-    dem = np.tile((crest - x) * 6.0, (rows, 1))  # apex ~360 m at the crest
+    dem = np.tile((crest - x) * 6.0, (rows, 1))
 
     sun = sun_vector(90.0, 22.0)  # low, from the east
     core = core_shadow(dem, 12.0, 12.0, sun)
-    _hs, core_f, cast_f = shaded_relief(
+    _hs, _sl, core_f, cast_f = shaded_relief(
         dem, dx=12.0, dy=12.0, sun_azimuth=90.0, sun_altitude=22.0
     )
     core_split = core_f > 0.5
     cast_split = cast_f > 0.5
 
-    # the west ramp faces away from an eastern sun -> core shadow there
     row = rows // 2
     assert core[row, crest - 20]
     assert core_split[row, crest - 20]
-    # the east ramp faces the sun -> not core-shadowed
     assert not core[row, crest + 20]
-    # shaded_relief's cast layer never overlaps its core layer
     assert not (core_split & cast_split).any()
 
 
 def test_cast_shadow_is_beyond_the_terminator():
-    # a tall thin tower on flat ground: it self-shadows its own west face (core)
-    # AND throws a cast shadow onto the flat ground to its west (sun from east).
     rows, cols = 20, 160
     dem = np.zeros((rows, cols))
-    dem[:, 90:96] = 250.0  # a 6-cell-wide block
+    dem[:, 90:96] = 250.0
 
-    _hs, core_f, cast_f = shaded_relief(
+    _hs, _sl, core_f, cast_f = shaded_relief(
         dem, dx=10.0, dy=10.0, sun_azimuth=90.0, sun_altitude=20.0
     )
     row = rows // 2
-    # flat ground just west of the block: sun-facing (flat), but occluded ->
-    # this is a *cast* shadow, not core
     assert cast_f[row, 88] > 0.5
     assert core_f[row, 88] < 0.5
-    # far west, past the shadow tip: lit
     reach = int(round((250.0 / np.tan(np.radians(20.0))) / 10.0))
     assert cast_f[row, 90 - reach - 3] < 0.5
 
 
 def test_shade_gain_steepens_shading_only():
-    # a gentle uniform slope. Raising shade_gain darkens the anti-sun face more,
-    # but must not change the (here empty) cast-shadow mask.
     rows, cols = 20, 20
-    dem = np.tile(np.arange(cols) * 4.0, (rows, 1))  # slopes up to the east
+    dem = np.tile(np.arange(cols) * 4.0, (rows, 1))
     sun = sun_vector(90.0, 40.0)  # from the east -> east-up slope faces away
 
     faithful = hillshade(dem, 15.0, 15.0, sun, shade_gain=1.0)
     steep = hillshade(dem, 15.0, 15.0, sun, shade_gain=2.0)
-    assert steep.mean() < faithful.mean()          # darker overall
-    # geometry unchanged: no cast shadow on a single planar slope either way
+    assert steep.mean() < faithful.mean()
+    # slope field also steepens
+    assert slope(dem, 15.0, 15.0, shade_gain=2.0).mean() > slope(
+        dem, 15.0, 15.0, shade_gain=1.0
+    ).mean()
+    # geometry unchanged
     assert not cast_shadows(dem, 15.0, 15.0, sun).any()
 
 
-def test_shaded_relief_returns_three_layers_nan_outside():
+def test_compose_relief_two_lights():
+    # a steep uniform slope dropping to the east; sun raking from the west so
+    # the east-facing slope is the anti-sun side and the hillshade there ~0.
+    rows, cols = 24, 24
+    dem = np.tile((cols - np.arange(cols)) * 30.0, (rows, 1))
+    hs, sl, _core, _cast = shaded_relief(
+        dem, dx=20.0, dy=20.0, sun_azimuth=270.0, sun_altitude=22.0
+    )
+    interior = (slice(2, -2), slice(2, -2))
+
+    single = compose_relief(hs, sl, zenith_weight=0.0)
+    two = compose_relief(hs, sl, zenith_weight=0.5)
+
+    # w=0 is the hillshade untouched
+    assert np.array_equal(single, hs)
+    # the raking-only shade is near black here; the zenithal blend lifts it well
+    # off the floor (steep, so 1-slope is modest) without whiting it out
+    assert np.nanmean(single[interior]) < 0.15
+    assert np.nanmean(two[interior]) > np.nanmean(single[interior]) + 0.1
+    assert np.nanmean(two[interior]) < 0.9
+
+    # flat ground: slope 0, hillshade = sin(alt); blend is the plain average
+    flat = np.zeros((10, 10))
+    hf, slf, _c, _k = shaded_relief(
+        flat, dx=20.0, dy=20.0, sun_azimuth=270.0, sun_altitude=22.0
+    )
+    b = compose_relief(hf, slf, zenith_weight=0.5)
+    assert np.allclose(b, 0.5 * np.sin(np.radians(22.0)) + 0.5 * 1.0, atol=1e-9)
+
+
+def test_compose_relief_does_not_touch_the_shadow_masks():
+    rows, cols = 20, 40
+    dem = np.tile((cols - np.arange(cols)) * 20.0, (rows, 1))
+    hs, sl, core_f, cast_f = shaded_relief(
+        dem, dx=15.0, dy=15.0, sun_azimuth=270.0, sun_altitude=20.0
+    )
+    a = compose_relief(hs, sl, zenith_weight=0.0)
+    b = compose_relief(hs, sl, zenith_weight=0.6)
+    assert not np.allclose(a, b)          # the wash changed
+    # core/cast are inputs to compose, untouched by it
+    hs2, sl2, core2, cast2 = shaded_relief(
+        dem, dx=15.0, dy=15.0, sun_azimuth=270.0, sun_altitude=20.0
+    )
+    assert np.array_equal(np.isfinite(core_f) & (core_f > 0.5),
+                          np.isfinite(core2) & (core2 > 0.5))
+    assert np.array_equal(np.isfinite(cast_f) & (cast_f > 0.5),
+                          np.isfinite(cast2) & (cast2 > 0.5))
+
+
+def test_shaded_relief_returns_four_fields_nan_outside():
     dem = np.full((20, 20), 100.0)
     dem[:5, :] = np.nan
     dem[10:, 10:] = 400.0
     out = shaded_relief(dem, dx=30.0, dy=30.0, sun_azimuth=110.0, sun_altitude=25.0)
-    assert len(out) == 3
-    hs, core_f, cast_f = out
+    assert len(out) == 4
+    hs, sl, core_f, cast_f = out
     for layer in out:
         assert layer.shape == dem.shape
-        assert np.isnan(layer[:5, :]).all()        # NaN preserved outside the DEM
+        assert np.isnan(layer[:5, :]).all()
     assert np.isfinite(hs[5:, :]).all()
-    # masks are 0..1 where finite
-    assert np.nanmin(core_f) >= 0.0 and np.nanmax(core_f) <= 1.0
-    assert np.nanmin(cast_f) >= 0.0 and np.nanmax(cast_f) <= 1.0
+    assert np.isfinite(sl[5:, :]).all()
+    for layer in out:
+        assert np.nanmin(layer) >= 0.0 and np.nanmax(layer) <= 1.0
 
 
 def test_nan_outside_is_preserved():
@@ -172,5 +230,6 @@ def test_nan_outside_is_preserved():
     hs = hillshade(dem, 30.0, 30.0, sun)
     assert np.isnan(hs[:5, :]).all()
     assert np.isfinite(hs[5:, :]).all()
+    assert np.isnan(slope(dem, 30.0, 30.0)[:5, :]).all()
     assert not cast_shadows(dem, 30.0, 30.0, sun)[:5, :].any()
     assert not core_shadow(dem, 30.0, 30.0, sun)[:5, :].any()
