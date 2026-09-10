@@ -25,5 +25,3 @@ venv/
 .DS_Store
 .vscode/
 
-# scratch
-/scratchpad/
