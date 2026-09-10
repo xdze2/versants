@@ -1,24 +1,33 @@
 """Render a valley catalog (the nested dict from :func:`valleespyr.catalog.build_catalog`)
-as one self-contained static HTML file — a **git-graph of the river network**.
+as one self-contained static HTML file — a **collapsible git-graph of the river
+network**.
 
 Each *river* (a branch) is one **lane**: a coloured vertical line in its own
 column, tinted by Strahler order (dark & thick for the trunk, pale & thin for a
 headwater). A tributary lane runs down from the row where it branches off its
-parent, curving left into the parent lane at that row — a merge. The parent lane
-runs straight through, never interrupted. There is **one row per river**, not per
-reach: the confluence points BD TOPO splits a watercourse into are not drawn.
-Row order is a depth-first walk from the root; lanes are recycled the moment a
-tributary's whole sub-basin has been drawn, so the graph stays narrow.
+parent and turns left into the parent lane with a right-angle **elbow** — a
+merge. The parent lane runs straight through, never interrupted. There is **one
+row per river**, not per reach.
 
-The layout is computed here and emitted as a single inline ``<svg>`` next to a
-column of labels (name + length / order / upstream count / Pfafstetter code).
-Beyond ``--max-depth`` a branch collapses to one ``+N rivers`` leaf row. No
-server, no CDN: inline CSS + a few lines of JS for a name filter.
+Unlike a frozen ``<svg>``, the graph here is **laid out in the browser**: the
+page ships the catalog JSON and a small script that walks the tree, assigns
+lanes, and draws the SVG + label list together. Because both come from the same
+walk they never desync, so the graph can *collapse*:
+
+* an **order slider** hides every river below a chosen Strahler order — a whole
+  Garonne opens legible, with low-order headwaters folded into a ``+N`` count on
+  the row they join;
+* any river with hidden children shows a ``▸`` caret; clicking it splices that
+  sub-basin back in (or folds it away) and the graph re-renders.
+
+The server still renders the *initial* state into the document (so it is a
+valid, readable git-graph with no JS), then the script re-renders on every
+slider move or caret click. Beyond ``--max-depth`` a branch is folded to a
+``+N rivers`` leaf as before.
 
 When the catalog carries a ``geo`` block (``valleespyr catalog --geo``) a third
 column holds a sticky mini-map: clicking a row draws just that river and its
-upstream network there, lon/lat projected in the browser, fit to frame — the
-"listing on the left, selected valley on the right" view.
+upstream network there, lon/lat projected in the browser, fit to frame.
 
 ``render_catalog_html(catalog, path)`` writes the file; ``catalog_to_html`` gives
 the string.
@@ -28,25 +37,23 @@ from __future__ import annotations
 
 import html
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-# --- geometry -----------------------------------------------------------------
+# --- geometry (shared with the client via _GEOM) ---------------------------
 ROW_H = 24          # px per row
 LANE_W = 15         # px per lane column
 LANE_PAD = 10       # left padding before lane 0
 DOT_R = 3.2         # merge/branch dot radius
 LABEL_GAP = 14      # px between the lane area and the label column
-# Mini-map (only with a geo block). The column is fluid — up to half the
-# window, never below MAP_MIN — while MAP_VB is the fixed SVG coordinate box the
-# projection maths works in; the element just scales to fit its column.
+ELBOW_R = 5.0       # px corner radius on a merge elbow
+# Mini-map (only with a geo block).
 MAP_MIN = 340       # px — floor for the map column on narrow windows
 MAP_MAX_VW = 50     # % of window width — ceiling for the map column
 MAP_VB_W = 720      # SVG viewBox width  (internal units)
 MAP_VB_H = 760      # SVG viewBox height (internal units)
 
-# Strahler order -> (stroke width, colour). Clamped to the table ends.
+# Strahler order -> (stroke width, colour). Index 0 == order 1; clamped to ends.
 _ORDER_STYLE = [
     (1.1, "#9db8d0"),  # 1 — pale headwater
     (1.4, "#7ba3c9"),  # 2
@@ -56,284 +63,22 @@ _ORDER_STYLE = [
     (3.4, "#244d7c"),  # 6
     (4.0, "#1c3e63"),  # 7+ — trunk
 ]
+_BG = "#fbfbfa"
 
 
-def _order_style(order: int | None) -> tuple[float, str]:
-    i = 0 if not order else min(max(order, 1), len(_ORDER_STYLE)) - 1
-    return _ORDER_STYLE[i]
+def _max_order(root: dict[str, Any]) -> int:
+    m = 0
+    stack = [root]
+    while stack:
+        n = stack.pop()
+        m = max(m, n.get("strahler") or 0)
+        if n.get("mainline"):
+            stack.append(n["mainline"])
+        stack.extend(n.get("tributaries") or [])
+    return m
 
 
-# --- layout -----------------------------------------------------------------
-
-
-@dataclass
-class Row:
-    """One river on one graph row."""
-
-    node: dict[str, Any]
-    lane: int
-    parent_lane: int | None       # lane this river merges into (None for the root)
-    depth: int
-    is_collapsed_leaf: bool = False
-    collapsed_count: int = 0
-
-
-@dataclass
-class Seg:
-    """A vertical run of one lane, from row ``top`` to row ``bot`` inclusive,
-    owned by the river whose head row is ``owner`` (for its style)."""
-
-    lane: int
-    top: int
-    bot: int
-    owner: int
-
-
-class _Layout:
-    """Depth-first row + lane assignment for one catalog tree.
-
-    Row order: a river, then each of its tributaries' sub-trees (biggest first),
-    then its mainline continuation — pre-order DFS, so a parent sits above every
-    river in its catchment. The root's branch holds lane 0; a tributary takes
-    the lowest lane not currently in use and releases it the moment its last
-    descendant row is emitted. Each *branch* (a river + its mainline chain)
-    records one :class:`Seg` for the vertical line it owns.
-    """
-
-    def __init__(self, root: dict[str, Any], *, max_depth: int | None):
-        self.rows: list[Row] = []
-        self.segs: list[Seg] = []
-        self.max_depth = max_depth
-        self._free: list[int] = []
-        self._next_lane = 0
-        self._walk(root, lane=self._alloc(), parent_lane=None, depth=0)
-        self.max_lane = max((r.lane for r in self.rows), default=0)
-
-    def _alloc(self) -> int:
-        if self._free:
-            lane = min(self._free)
-            self._free.remove(lane)
-            return lane
-        lane = self._next_lane
-        self._next_lane += 1
-        return lane
-
-    def _release(self, lane: int) -> None:
-        self._free.append(lane)
-
-    def _walk(
-        self, node: dict[str, Any], *, lane: int, parent_lane: int | None, depth: int
-    ) -> None:
-        """Emit one branch (``node`` + its mainline chain) and recurse into every
-        tributary. Records one vertical :class:`Seg` for the branch, spanning
-        from its head row down to the LAST row of its whole sub-basin — so the
-        lane's line runs unbroken past every tributary that hangs off it.
-
-        Fold depth is the node's own ``depth`` (confluences from the root, set by
-        :func:`valleespyr.catalog.build_catalog`); ``depth`` here is only the
-        fallback when a node predates that field.
-        """
-        head_row = len(self.rows)
-        cur: dict[str, Any] | None = node
-        cur_parent_lane = parent_lane
-
-        while cur is not None:
-            cur_depth = cur.get("depth", depth)
-            if self.max_depth is not None and cur_depth > self.max_depth:
-                self.rows.append(
-                    Row(cur, lane, cur_parent_lane, cur_depth,
-                        is_collapsed_leaf=True, collapsed_count=_subtree_count(cur))
-                )
-                break
-
-            self.rows.append(Row(cur, lane, cur_parent_lane, cur_depth))
-            cur_parent_lane = None  # only the branch head merges into a parent
-
-            for t in cur.get("tributaries") or []:
-                tlane = self._alloc()
-                self._walk(t, lane=tlane, parent_lane=lane, depth=cur_depth + 1)
-            trunc = cur.get("tributaries_truncated") or 0
-            if trunc:
-                tlane = self._alloc()
-                self.rows.append(
-                    Row({"name": None, "id": f"+{trunc}"}, tlane, lane,
-                        cur_depth + 1, is_collapsed_leaf=True, collapsed_count=trunc)
-                )
-                self.segs.append(Seg(tlane, len(self.rows) - 1, len(self.rows) - 1,
-                                     len(self.rows) - 1))
-                self._release(tlane)
-
-            cur = cur.get("mainline")
-
-        # the branch's line spans everything drawn since its head — its mainline
-        # chain and every tributary sub-basin nested under it
-        self.segs.append(Seg(lane, head_row, len(self.rows) - 1, head_row))
-        self._release(lane)
-
-
-def _subtree_count(node: dict[str, Any]) -> int:
-    n = 1
-    if node.get("mainline") is not None:
-        n += _subtree_count(node["mainline"])
-    for t in node.get("tributaries") or []:
-        n += _subtree_count(t)
-    n += node.get("tributaries_truncated") or 0
-    return n
-
-
-# --- SVG -------------------------------------------------------------------
-
-
-def _lane_x(lane: int) -> float:
-    return LANE_PAD + lane * LANE_W + LANE_W / 2
-
-
-def _draw_svg(layout: _Layout) -> tuple[str, float]:
-    """Return ``(svg_markup, lane_area_width_px)``.
-
-    Drawn in three passes so lines sit under dots and the trunk (drawn last,
-    lowest lane) sits on top of the pale headwater lines it crosses:
-    vertical branch segments (:class:`Seg`), then merge curves, then dots.
-    """
-    n = len(layout.rows)
-    lane_w = LANE_PAD + (layout.max_lane + 1) * LANE_W
-    h = n * ROW_H
-
-    def y(i: int) -> float:
-        return i * ROW_H + ROW_H / 2
-
-    # vertical segments, higher lane numbers first so the trunk overpaints them
-    segs = sorted(layout.segs, key=lambda s: -s.lane)
-    lines: list[str] = []
-    for s in segs:
-        r0 = layout.rows[s.owner]
-        width, colour = _order_style(r0.node.get("strahler"))
-        y1 = y(s.top)
-        y2 = y(s.bot)
-        lines.append(
-            f'<line x1="{_lane_x(s.lane):.1f}" y1="{y1:.1f}" '
-            f'x2="{_lane_x(s.lane):.1f}" y2="{y2:.1f}" '
-            f'stroke="{colour}" stroke-width="{width:.1f}"/>'
-        )
-
-    curves: list[str] = []
-    dots: list[str] = []
-    for i, r in enumerate(layout.rows):
-        width, colour = _order_style(r.node.get("strahler"))
-        cx = _lane_x(r.lane)
-        cy = y(i)
-
-        if r.parent_lane is not None:
-            px = _lane_x(r.parent_lane)
-            # branch off the parent lane: start on it a full row up, S-curve
-            # down-and-right into this river's dot
-            ytop = cy - ROW_H
-            cw = max(width, 1.6)
-            curves.append(
-                f'<path d="M{px:.1f},{ytop:.1f} '
-                f'C{px:.1f},{cy - ROW_H * 0.15:.1f} '
-                f'{cx:.1f},{cy - ROW_H * 0.55:.1f} '
-                f'{cx:.1f},{cy:.1f}" '
-                f'stroke="{colour}" stroke-width="{cw:.1f}"/>'
-            )
-
-        if r.is_collapsed_leaf:
-            dots.append(
-                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="2.3" fill="{_bg()}" '
-                f'stroke="{colour}" stroke-width="1.5"/>'
-            )
-        else:
-            dots.append(
-                f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{DOT_R:.1f}" '
-                f'fill="{colour}"/>'
-            )
-
-    svg = (
-        f'<svg class="graph" width="{lane_w}" height="{h}" '
-        f'viewBox="0 0 {lane_w} {h}" aria-hidden="true">'
-        f'<g stroke-linecap="round" fill="none">{"".join(lines)}{"".join(curves)}</g>'
-        f'<g stroke-linecap="round">{"".join(dots)}</g>'
-        "</svg>"
-    )
-    return svg, lane_w
-
-
-def _bg() -> str:
-    return "#fbfbfa"
-
-
-# --- labels + document ----------------------------------------------------
-
-
-def _fmt_facts(node: dict[str, Any]) -> str:
-    bits = []
-    if node.get("length_km") is not None:
-        bits.append(f'<span class="k">len</span> {node["length_km"]:g} km')
-    if node.get("strahler"):
-        bits.append(f'<span class="k">ord</span> {node["strahler"]}')
-    if node.get("n_upstream"):
-        bits.append(f'<span class="k">up</span> {node["n_upstream"]}')
-    if node.get("area_km2"):
-        bits.append(f'<span class="k">area</span> {node["area_km2"]:g} km²')
-    if node.get("pfafstetter"):
-        bits.append(f'<span class="pfaf">{html.escape(node["pfafstetter"])}</span>')
-    return " · ".join(bits)
-
-
-def _also_html(node: dict[str, Any]) -> str:
-    also = node.get("also_flows_into") or []
-    if not also:
-        return ""
-    names = ", ".join(html.escape(a["name"] or a["id"]) for a in also)
-    return f' <span class="also" title="bifurcation">⋔ also → {names}</span>'
-
-
-def _labels_html(layout: _Layout) -> str:
-    out = ['<ol class="labels">']
-    for r in layout.rows:
-        node = r.node
-        if r.is_collapsed_leaf and not node.get("name") and str(node.get("id", "")).startswith("+"):
-            out.append(
-                f'<li class="row leaf" style="height:{ROW_H}px">'
-                f'<span class="name unnamed">+{r.collapsed_count} rivers upstream</span>'
-                "</li>"
-            )
-            continue
-        name = node.get("name")
-        if name:
-            cls = "name"
-            label = html.escape(name)
-        else:
-            cls = "name unnamed"
-            label = html.escape(str(node.get("id", "?")))
-        leaf = " leaf" if r.is_collapsed_leaf else ""
-        extra = (
-            f' <span class="more">+{r.collapsed_count}</span>'
-            if r.is_collapsed_leaf
-            else ""
-        )
-        src = " ▲" if _is_source(node) and not r.is_collapsed_leaf else ""
-        out.append(
-            f'<li class="row{leaf}" data-id="{html.escape(str(node.get("id", "")))}" '
-            f'style="height:{ROW_H}px">'
-            f'<span class="{cls}">{label}{src}</span>{extra}'
-            f'<span class="facts">{_fmt_facts(node)}{_also_html(node)}</span>'
-            "</li>"
-        )
-    out.append("</ol>")
-    return "".join(out)
-
-
-def _is_source(node: dict[str, Any]) -> bool:
-    return bool(
-        node.get("is_headwater")
-        or (
-            not (node.get("tributaries") or [])
-            and not (node.get("tributaries_truncated") or 0)
-            and node.get("mainline") is None
-        )
-    )
-
+# --- document -------------------------------------------------------------
 
 _CSS_TMPL = """
 :root {{
@@ -351,11 +96,15 @@ header {{
 }}
 h1 {{ margin: 0 0 2px; font-size: 17px; font-weight: 600; }}
 .meta {{ color: var(--dim); font-size: 12px; }}
-.controls {{ margin-top: 9px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }}
+.controls {{ margin-top: 9px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }}
 .controls input[type=search] {{
   padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px;
-  font: inherit; min-width: 220px; background: #fff;
+  font: inherit; min-width: 200px; background: #fff;
 }}
+.orderctl {{ display: flex; gap: 7px; align-items: center; color: var(--dim); font-size: 12px; }}
+.orderctl input[type=range] {{ width: 120px; }}
+.orderctl b {{ color: var(--ink); font-variant-numeric: tabular-nums; }}
+.orderctl .n {{ color: var(--faint); }}
 .legend {{ display: flex; gap: 10px; align-items: center; color: var(--faint); font-size: 11px; }}
 .legend i {{ width: 20px; height: 0; border-top-style: solid; display: inline-block;
   vertical-align: middle; margin-right: 3px; }}
@@ -368,22 +117,29 @@ main {{ padding: 8px 22px 60px; }}
 svg.graph {{ display: block; position: sticky; left: 0; }}
 ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .labels .row {{
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 8px;
   padding: 0 8px; white-space: nowrap; cursor: default;
 }}
 .labels .row:hover {{ background: #fff; box-shadow: inset 0 0 0 1px var(--line); }}
 .has-geo .labels .row {{ cursor: pointer; }}
-.labels .row.selected {{ background: #fff; box-shadow: inset 2px 0 0 var(--accent); }}
+.labels .row.selected {{ background: #eef5f0; }}
+.labels .row.selected .name {{ color: var(--accent); }}
+.caret {{
+  flex: none; width: 15px; height: 15px; margin-left: -3px; border: 0;
+  padding: 0; background: none; cursor: pointer; color: var(--faint);
+  font-size: 10px; line-height: 15px; text-align: center;
+}}
+.caret:hover {{ color: var(--ink); }}
+.caret[hidden] {{ display: inline-block; visibility: hidden; }}
+.caret.open {{ transform: rotate(90deg); }}
 
 .mapcol {{ position: sticky; top: {map_top}px; align-self: start; }}
 .mapcard {{
   border: 1px solid var(--line); border-radius: 8px; background: #fff;
   overflow: hidden; width: 100%;
 }}
-/* the SVG keeps the viewBox aspect ratio and scales to the fluid column */
 #map {{ display: block; width: 100%; height: auto;
   aspect-ratio: {map_ar}; background: #fbfcfd; }}
-/* strokes stay a constant screen width as the viewBox zooms in */
 #map path, #map circle {{ vector-effect: non-scaling-stroke; }}
 #map .ctx {{ fill: none; stroke: #d3dae1; stroke-width: 1;
   stroke-linecap: round; stroke-linejoin: round; }}
@@ -414,209 +170,444 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 mark {{ background: #ffe9a8; color: inherit; }}
 """
 
+# Everything below runs in the browser. It owns the layout: one depth-first
+# walk assigns rows + lanes for the *currently visible* tree, then paints the
+# SVG (elbow merges) and the <li> list from that single pass, so the two
+# columns can never desync as the tree collapses.
 _JS = r"""
 (function () {
-  const q = document.getElementById('filter');
-  const rows = Array.from(document.querySelectorAll('.labels .row'));
-  q.addEventListener('input', () => {
-    const t = q.value.trim().toLowerCase();
-    rows.forEach(li => {
+  const G = __GEOM__;
+  const ORDER_STYLE = __ORDER_STYLE__;
+  const data = JSON.parse(document.getElementById('catalog-data').textContent);
+  const root = data.root;
+  const meta = data.meta || {};
+
+  const graphSvg = document.getElementById('graph');
+  const labelsEl = document.getElementById('labels');
+  const metaExtra = document.getElementById('meta-extra');
+  const slider = document.getElementById('order');
+  const orderOut = document.getElementById('order-val');
+  const filterEl = document.getElementById('filter');
+
+  // --- style helpers ------------------------------------------------------
+  function orderStyle(order) {
+    const i = !order ? 0 : Math.min(Math.max(order, 1), ORDER_STYLE.length) - 1;
+    return ORDER_STYLE[i];
+  }
+  function laneX(lane) { return G.LANE_PAD + lane * G.LANE_W + G.LANE_W / 2; }
+  function rowY(i) { return i * G.ROW_H + G.ROW_H / 2; }
+
+  function subtreeCount(n) {
+    let c = 1;
+    if (n.mainline) c += subtreeCount(n.mainline);
+    for (const t of n.tributaries || []) c += subtreeCount(t);
+    c += n.tributaries_truncated || 0;
+    return c;
+  }
+  function subtreeMaxOrder(n) {
+    let m = n.strahler || 0;
+    if (n.mainline) m = Math.max(m, subtreeMaxOrder(n.mainline));
+    for (const t of n.tributaries || []) m = Math.max(m, subtreeMaxOrder(t));
+    return m;
+  }
+  function isSource(n) {
+    return !!(n.is_headwater ||
+      (!(n.tributaries || []).length && !(n.tributaries_truncated || 0) && !n.mainline));
+  }
+
+  // --- per-river UI state (which sub-basins the user forced open/closed) --
+  // key: river id -> true (forced open) / false (forced closed) / undefined
+  const forced = new Map();
+
+  // --- the layout walk --------------------------------------------------
+  // Returns {rows, segs, maxLane}. A "row" is one visible river; "segs" are
+  // vertical lane runs. minOrder gates a whole sub-basin: if its richest
+  // river is below the threshold and the user has not forced it open, it
+  // folds to a +N leaf on the row it joins.
+  function layout(minOrder) {
+    const rows = [], segs = [];
+    const free = [];
+    let nextLane = 0;
+    const alloc = () => {
+      if (free.length) { free.sort((a, b) => a - b); return free.shift(); }
+      return nextLane++;
+    };
+    const release = (l) => free.push(l);
+
+    function visibleTribs(node) {
+      // [{node} | {fold: n, count}], biggest first (input already sorted)
+      const out = [];
+      let folded = 0;
+      for (const t of node.tributaries || []) {
+        const force = forced.get(t.id);
+        const show = force === true ||
+          (force !== false && subtreeMaxOrder(t) >= minOrder);
+        if (show) out.push({ node: t });
+        else folded += subtreeCount(t);
+      }
+      folded += node.tributaries_truncated || 0;
+      return { tribs: out, folded };
+    }
+
+    function walk(node, lane, parentLane, depth) {
+      const headRow = rows.length;
+      let cur = node, curParentLane = parentLane;
+      while (cur) {
+        const curDepth = cur.depth != null ? cur.depth : depth;
+        if (G.MAX_DEPTH != null && curDepth > G.MAX_DEPTH) {
+          rows.push({ node: cur, lane, parentLane: curParentLane, depth: curDepth,
+                      leaf: true, count: subtreeCount(cur), hasHidden: false });
+          break;
+        }
+        const { tribs, folded } = visibleTribs(cur);
+        rows.push({ node: cur, lane, parentLane: curParentLane, depth: curDepth,
+                    leaf: false, count: 0,
+                    hasHidden: folded > 0, foldedCount: folded });
+        curParentLane = null;  // only the branch head merges into a parent
+
+        for (const item of tribs) {
+          const tl = alloc();
+          walk(item.node, tl, lane, curDepth + 1);
+        }
+        if (folded > 0) {
+          const tl = alloc();
+          rows.push({ node: { name: null, id: '+' + folded }, lane: tl,
+                      parentLane: lane, depth: curDepth + 1, leaf: true,
+                      count: folded, hasHidden: false });
+          segs.push({ lane: tl, top: rows.length - 1, bot: rows.length - 1,
+                      owner: rows.length - 1 });
+          release(tl);
+        }
+        cur = cur.mainline;
+      }
+      segs.push({ lane, top: headRow, bot: rows.length - 1, owner: headRow });
+      release(lane);
+    }
+
+    walk(root, alloc(), null, 0);
+    const maxLane = rows.reduce((m, r) => Math.max(m, r.lane), 0);
+    return { rows, segs, maxLane };
+  }
+
+  // --- draw the graph SVG from a layout --------------------------------
+  function drawGraph(lo) {
+    const n = lo.rows.length;
+    const laneW = G.LANE_PAD + (lo.maxLane + 1) * G.LANE_W;
+    const h = n * G.ROW_H;
+
+    // vertical lane segments, higher lanes first so the trunk overpaints
+    const segs = lo.segs.slice().sort((a, b) => b.lane - a.lane);
+    let lines = '';
+    for (const s of segs) {
+      const [w, c] = orderStyle(lo.rows[s.owner].node.strahler);
+      const x = laneX(s.lane);
+      lines += '<line x1="' + x.toFixed(1) + '" y1="' + rowY(s.top).toFixed(1) +
+               '" x2="' + x.toFixed(1) + '" y2="' + rowY(s.bot).toFixed(1) +
+               '" stroke="' + c + '" stroke-width="' + w.toFixed(1) + '"/>';
+    }
+
+    let elbows = '', dots = '';
+    lo.rows.forEach((r, i) => {
+      const [w, c] = orderStyle(r.node.strahler);
+      const cx = laneX(r.lane), cy = rowY(i);
+      if (r.parentLane != null) {
+        // a merge that comes OFF the parent lane just above this river's dot:
+        // a single smooth cubic from a point one row up on the parent lane
+        // across into the dot. No straight vertical stub running alongside the
+        // parent (that read as a doubled line); the curve's control points sit
+        // on the two lanes so it leaves vertical and arrives horizontal.
+        const px = laneX(r.parentLane);
+        const ew = Math.max(w, 1.4);
+        const y0 = cy - G.ROW_H;              // start: a row up, on the parent
+        elbows += '<path d="M' + px.toFixed(1) + ',' + y0.toFixed(1) +
+                  ' C' + px.toFixed(1) + ',' + (y0 + G.ROW_H * 0.55).toFixed(1) +
+                  ' ' + cx.toFixed(1) + ',' + (cy - G.ROW_H * 0.55).toFixed(1) +
+                  ' ' + cx.toFixed(1) + ',' + cy.toFixed(1) + '" ' +
+                  'stroke="' + c + '" stroke-width="' + ew.toFixed(1) + '"/>';
+      }
+      if (r.leaf) {
+        dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                '" r="2.3" fill="' + G.BG + '" stroke="' + c + '" stroke-width="1.5"/>';
+      } else {
+        dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                '" r="' + G.DOT_R.toFixed(1) + '" fill="' + c + '"/>';
+      }
+    });
+
+    graphSvg.setAttribute('width', laneW);
+    graphSvg.setAttribute('height', h);
+    graphSvg.setAttribute('viewBox', '0 0 ' + laneW + ' ' + h);
+    graphSvg.innerHTML =
+      '<g stroke-linecap="round" fill="none">' + lines + elbows + '</g>' +
+      '<g stroke-linecap="round">' + dots + '</g>';
+    // keep the label column aligned with lane 0
+    document.querySelector('.graphwrap').style.gridTemplateColumns =
+      (laneW + G.LABEL_GAP) + 'px ' + G.REST_COLS;
+  }
+
+  // --- draw the label list from a layout ------------------------------
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  function facts(n) {
+    const b = [];
+    if (n.length_km != null) b.push('<span class="k">len</span> ' + (+n.length_km) + ' km');
+    if (n.strahler) b.push('<span class="k">ord</span> ' + n.strahler);
+    if (n.n_upstream) b.push('<span class="k">up</span> ' + n.n_upstream);
+    if (n.area_km2) b.push('<span class="k">area</span> ' + (+n.area_km2) + ' km²');
+    if (n.pfafstetter) b.push('<span class="pfaf">' + esc(n.pfafstetter) + '</span>');
+    return b.join(' · ');
+  }
+  function alsoHtml(n) {
+    const a = n.also_flows_into || [];
+    if (!a.length) return '';
+    const names = a.map(x => esc(x.name || x.id)).join(', ');
+    return ' <span class="also" title="bifurcation">⋔ also → ' + names + '</span>';
+  }
+
+  function drawLabels(lo) {
+    let out = '';
+    for (const r of lo.rows) {
+      const n = r.node;
+      if (r.leaf && !n.name && String(n.id || '').startsWith('+')) {
+        out += '<li class="row leaf" style="height:' + G.ROW_H + 'px">' +
+               '<span class="caret" hidden></span>' +
+               '<span class="name unnamed">+' + r.count + ' rivers upstream</span></li>';
+        continue;
+      }
+      const named = !!n.name;
+      const cls = named ? 'name' : 'name unnamed';
+      const label = esc(named ? n.name : (n.id || '?'));
+      const leaf = r.leaf ? ' leaf' : '';
+      const extra = r.leaf ? ' <span class="more">+' + r.count + '</span>' : '';
+      const src = (isSource(n) && !r.leaf) ? ' ▲' : '';
+      let caret = '<span class="caret" hidden></span>';
+      if (!r.leaf && r.hasHidden) {
+        caret = '<button class="caret" data-open="' +
+                (forced.get(n.id) === true ? '1' : '0') + '" data-id="' +
+                esc(n.id) + '" title="' + r.foldedCount +
+                ' hidden upstream">▸</button>';
+      } else if (!r.leaf && forced.get(n.id) === true) {
+        // opened past the slider; offer to re-fold
+        caret = '<button class="caret open" data-open="1" data-id="' + esc(n.id) +
+                '" title="fold this sub-basin">▸</button>';
+      }
+      out += '<li class="row' + leaf + '" data-id="' + esc(n.id || '') +
+             '" style="height:' + G.ROW_H + 'px">' + caret +
+             '<span class="' + cls + '">' + label + src + '</span>' + extra +
+             '<span class="facts">' + facts(n) + alsoHtml(n) + '</span></li>';
+    }
+    labelsEl.innerHTML = out;
+    applyFilter();
+  }
+
+  // --- render = layout + both columns --------------------------------
+  let curLayout = null;
+  function render() {
+    const minOrder = +slider.value;
+    orderOut.textContent = minOrder;
+    curLayout = layout(minOrder);
+    drawGraph(curLayout);
+    drawLabels(curLayout);
+    const drawn = curLayout.rows.filter(r => !r.leaf).length;
+    const total = meta.n_nodes || drawn;
+    metaExtra.textContent = drawn < total
+      ? ' · ' + drawn + ' of ' + total + ' rivers shown'
+      : ' · ' + drawn + ' rivers';
+    if (window._catalogGeoSync) window._catalogGeoSync();
+  }
+
+  slider.addEventListener('input', render);
+  labelsEl.addEventListener('click', ev => {
+    const btn = ev.target.closest('.caret[data-id]');
+    if (!btn) return;
+    ev.stopPropagation();
+    const id = btn.dataset.id;
+    forced.set(id, btn.dataset.open === '1' ? false : true);
+    render();
+  });
+
+  // --- name filter (hides rows; does not relayout the graph) ---------
+  function applyFilter() {
+    const t = (filterEl.value || '').trim().toLowerCase();
+    for (const li of labelsEl.querySelectorAll('.row')) {
       const nameEl = li.querySelector('.name');
       const raw = nameEl ? nameEl.textContent : '';
-      if (nameEl) nameEl.textContent = raw;  // clear old <mark>
-      if (!t) { li.classList.remove('hidden'); return; }
+      if (nameEl) nameEl.textContent = raw;
+      if (!t) { li.classList.remove('hidden'); continue; }
       const i = raw.toLowerCase().indexOf(t);
-      if (i < 0) { li.classList.add('hidden'); return; }
+      if (i < 0) { li.classList.add('hidden'); continue; }
       li.classList.remove('hidden');
       if (nameEl) {
-        const a = raw.slice(0, i), b = raw.slice(i, i + t.length), c = raw.slice(i + t.length);
-        nameEl.innerHTML = a + '<mark>' + b + '</mark>' + c;
+        nameEl.innerHTML = esc(raw.slice(0, i)) + '<mark>' +
+          esc(raw.slice(i, i + t.length)) + '</mark>' + esc(raw.slice(i + t.length));
       }
-    });
-  });
-
-  // --- catchment mini-map (only when the catalog carries a geo block) --------
-  // The whole river network is drawn once, faint, in a fixed projection keyed
-  // to the catchment bbox. Selecting a row paints that river + its upstream
-  // network on top and eases the SVG viewBox in to frame the selection, so a
-  // small tributary fills the panel with the rest of the basin still visible
-  // behind it.
-  const data = JSON.parse(document.getElementById('catalog-data').textContent);
-  const geo = data.geo;
-  const svg = document.getElementById('map');
-  if (!geo || !geo.rivers || !geo.bbox || !svg) return;
-  document.body.classList.add('has-geo');
-
-  const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height, PAD = 14;
-
-  // id -> node, and id -> [upstream ids], from one walk of the tree
-  const node = {}, up = {};
-  (function walk(n) {
-    node[n.id] = n;
-    const kids = [];
-    if (n.mainline) kids.push(n.mainline);
-    for (const t of n.tributaries || []) kids.push(t);
-    let acc = [];
-    for (const k of kids) acc = acc.concat(walk(k));
-    up[n.id] = acc;
-    return acc.concat([n.id]);
-  })(data.root);
-
-  // fixed lon/lat -> px, catchment bbox letterboxed into the full viewBox
-  const [BW, BS, BE, BN] = geo.bbox;
-  const bdx = (BE - BW) || 1e-6, bdy = (BN - BS) || 1e-6;
-  const K = Math.min((W - 2 * PAD) / bdx, (H - 2 * PAD) / bdy);
-  const OX = (W - K * bdx) / 2, OY = (H - K * bdy) / 2;
-  const px = lon => OX + (lon - BW) * K;
-  const py = lat => OY + (BN - lat) * K;  // flip Y
-
-  function pathD(subs) {
-    let d = '';
-    for (const sub of subs) {
-      d += sub.map((p, i) =>
-        (i ? 'L' : 'M') + px(p[0]).toFixed(1) + ' ' + py(p[1]).toFixed(1)).join('');
     }
-    return d;
   }
-  function boxOf(ids) {
-    let w = Infinity, s = Infinity, e = -Infinity, nn = -Infinity;
-    for (const id of ids) {
+  filterEl.addEventListener('input', applyFilter);
+
+  // --- catchment mini-map (only when the catalog carries a geo block) ---
+  (function initGeo() {
+    const geo = data.geo;
+    const svg = document.getElementById('map');
+    if (!geo || !geo.rivers || !geo.bbox || !svg) return;
+    document.body.classList.add('has-geo');
+
+    const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height, PAD = 14;
+    const node = {}, up = {};
+    (function w(n) {
+      node[n.id] = n;
+      const kids = [];
+      if (n.mainline) kids.push(n.mainline);
+      for (const t of n.tributaries || []) kids.push(t);
+      let acc = [];
+      for (const k of kids) acc = acc.concat(w(k));
+      up[n.id] = acc;
+      return acc.concat([n.id]);
+    })(root);
+
+    const [BW, BS, BE, BN] = geo.bbox;
+    const bdx = (BE - BW) || 1e-6, bdy = (BN - BS) || 1e-6;
+    const K = Math.min((W - 2 * PAD) / bdx, (H - 2 * PAD) / bdy);
+    const OX = (W - K * bdx) / 2, OY = (H - K * bdy) / 2;
+    const px = lon => OX + (lon - BW) * K;
+    const py = lat => OY + (BN - lat) * K;
+
+    function pathD(subs) {
+      let d = '';
+      for (const sub of subs)
+        d += sub.map((p, i) => (i ? 'L' : 'M') + px(p[0]).toFixed(1) + ' ' +
+          py(p[1]).toFixed(1)).join('');
+      return d;
+    }
+    function boxOf(ids) {
+      let w = Infinity, s = Infinity, e = -Infinity, nn = -Infinity;
+      for (const id of ids) {
+        const g = geo.rivers[id];
+        if (!g) continue;
+        for (const sub of g.line) for (const [lon, lat] of sub) {
+          if (lon < w) w = lon; if (lon > e) e = lon;
+          if (lat < s) s = lat; if (lat > nn) nn = lat;
+        }
+      }
+      return isFinite(w) ? [w, s, e, nn] : null;
+    }
+
+    let ctx = '';
+    for (const id in geo.rivers)
+      ctx += '<path class="ctx" d="' + pathD(geo.rivers[id].line) + '"/>';
+    svg.innerHTML = '<g class="ctxg">' + ctx + '</g><g class="hi"></g>';
+    const hi = svg.querySelector('.hi');
+
+    let anim = null;
+    function setVB(v) { svg.setAttribute('viewBox', v.map(n => n.toFixed(1)).join(' ')); }
+    function easeVB(to) {
+      const from = [svg.viewBox.baseVal.x, svg.viewBox.baseVal.y,
+                    svg.viewBox.baseVal.width, svg.viewBox.baseVal.height];
+      if (anim) cancelAnimationFrame(anim);
+      if (!window.requestAnimationFrame) { setVB(to); return; }
+      const t0 = performance.now(), dur = 260;
+      setVB(to);
+      (function step(now) {
+        let u = Math.min(1, (now - t0) / dur);
+        u = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
+        setVB(from.map((f, i) => f + (to[i] - f) * u));
+        if (u < 1) anim = requestAnimationFrame(step); else setVB(to);
+      })(t0);
+    }
+    const MIN_SPAN = Math.min(W, H) * 0.42;
+    function frameToPx(box, mf) {
+      let cx = (px(box[0]) + px(box[2])) / 2, cy = (py(box[1]) + py(box[3])) / 2;
+      let w = Math.abs(px(box[2]) - px(box[0])), h = Math.abs(py(box[1]) - py(box[3]));
+      w += 2 * Math.max(w, h) * mf; h += 2 * Math.max(w, h) * mf;
+      w = Math.max(w, MIN_SPAN); h = Math.max(h, MIN_SPAN);
+      const ar = W / H;
+      if (w / h < ar) w = h * ar; else h = w / ar;
+      let x0 = cx - w / 2, y0 = cy - h / 2;
+      if (w >= W) { x0 = 0; w = W; } else x0 = Math.max(0, Math.min(x0, W - w));
+      if (h >= H) { y0 = 0; h = H; } else y0 = Math.max(0, Math.min(y0, H - h));
+      return [x0, y0, w, h];
+    }
+
+    const cap = document.getElementById('mapcap');
+    let current = null, currentId = null;
+    function cssEsc(s) {
+      return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
+    }
+
+    function select(id) {
       const g = geo.rivers[id];
-      if (!g) continue;
-      for (const sub of g.line) for (const [lon, lat] of sub) {
-        if (lon < w) w = lon; if (lon > e) e = lon;
-        if (lat < s) s = lat; if (lat > nn) nn = lat;
+      if (!g) return;
+      currentId = id;
+      let parts = '';
+      for (const uid of up[id] || []) {
+        const ug = geo.rivers[uid];
+        if (ug) parts += '<path class="up" d="' + pathD(ug.line) + '"/>';
       }
+      parts += '<path class="sel" d="' + pathD(g.line) + '"/>';
+      const ox = px(g.outlet[0]), oy = py(g.outlet[1]);
+      parts += '<circle class="outlet" cx="' + ox.toFixed(1) + '" cy="' +
+               oy.toFixed(1) + '" r="3.2"/>';
+      hi.innerHTML = parts;
+      const box = boxOf([id].concat(up[id] || []));
+      if (box) easeVB(frameToPx(box, 0.18));
+      const n = node[id] || {};
+      const bits = [];
+      if (n.length_km != null) bits.push(n.length_km + ' km');
+      if (n.area_km2) bits.push(n.area_km2 + ' km²');
+      const nUp = (up[id] || []).length;
+      bits.push(nUp ? nUp + ' rivers upstream' : 'headwater');
+      cap.innerHTML = '<b>' + esc(n.name || id) + '</b> · ' + bits.join(' · ') +
+        ' · <a href="#" id="mapreset">⤢ whole catchment</a>';
+      document.getElementById('mapreset').addEventListener('click', ev => {
+        ev.preventDefault(); easeVB([0, 0, W, H]);
+      });
+      syncSelectedRow();
     }
-    return isFinite(w) ? [w, s, e, nn] : null;
-  }
-
-  // static context layer: every river once, hairline
-  let ctx = '';
-  for (const id in geo.rivers) ctx += '<path class="ctx" d="' + pathD(geo.rivers[id].line) + '"/>';
-  svg.innerHTML = '<g class="ctxg">' + ctx + '</g><g class="hi"></g>';
-  const hi = svg.querySelector('.hi');
-
-  // viewBox easing (viewBox isn't CSS-animatable everywhere). The final frame
-  // is written up front so the map is correct even if rAF is throttled (some
-  // headless / background contexts); rAF then just fills in the motion.
-  let anim = null;
-  function setViewBox(v) { svg.setAttribute('viewBox', v.map(n => n.toFixed(1)).join(' ')); }
-  function easeViewBox(to) {
-    const from = [svg.viewBox.baseVal.x, svg.viewBox.baseVal.y,
-                  svg.viewBox.baseVal.width, svg.viewBox.baseVal.height];
-    if (anim) cancelAnimationFrame(anim);
-    if (!window.requestAnimationFrame) { setViewBox(to); return; }
-    const t0 = performance.now(), dur = 260;
-    setViewBox(to);  // commit the destination immediately
-    (function step(now) {
-      let u = Math.min(1, (now - t0) / dur);
-      u = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;  // easeInOutQuad
-      setViewBox(from.map((f, i) => f + (to[i] - f) * u));
-      if (u < 1) anim = requestAnimationFrame(step);
-      else setViewBox(to);
-    })(t0);
-  }
-  // don't zoom past this: a lone headwater still keeps a chunk of the
-  // surrounding network in frame for context (¼ of the panel, min)
-  const MIN_SPAN = Math.min(W, H) * 0.42;
-  function frameToPx(box, marginFrac) {
-    // selection lon/lat box -> a padded px viewBox, clamped to the full extent
-    let cx = (px(box[0]) + px(box[2])) / 2, cy = (py(box[1]) + py(box[3])) / 2;
-    let w = Math.abs(px(box[2]) - px(box[0])), h = Math.abs(py(box[1]) - py(box[3]));
-    w += 2 * Math.max(w, h) * marginFrac;
-    h += 2 * Math.max(w, h) * marginFrac;
-    w = Math.max(w, MIN_SPAN);
-    h = Math.max(h, MIN_SPAN);
-    // grow to the panel's aspect ratio, then position by centre
-    const ar = W / H;
-    if (w / h < ar) w = h * ar; else h = w / ar;
-    let x0 = cx - w / 2, y0 = cy - h / 2;
-    // clamp inside 0..W / 0..H
-    if (w >= W) { x0 = 0; w = W; } else x0 = Math.max(0, Math.min(x0, W - w));
-    if (h >= H) { y0 = 0; h = H; } else y0 = Math.max(0, Math.min(y0, H - h));
-    return [x0, y0, w, h];
-  }
-
-  const cap = document.getElementById('mapcap');
-  let current = null;
-
-  function select(id) {
-    const g = geo.rivers[id];
-    if (!g) return;
-
-    let parts = '';
-    for (const uid of up[id] || []) {
-      const ug = geo.rivers[uid];
-      if (ug) parts += '<path class="up" d="' + pathD(ug.line) + '"/>';
+    function syncSelectedRow() {
+      if (current) current.classList.remove('selected');
+      current = null;
+      if (!currentId) return;
+      const li = labelsEl.querySelector('.row[data-id="' + cssEsc(currentId) + '"]');
+      if (li) { li.classList.add('selected'); current = li; }
     }
-    parts += '<path class="sel" d="' + pathD(g.line) + '"/>';
-    const ox = px(g.outlet[0]), oy = py(g.outlet[1]);
-    parts += '<circle class="outlet" cx="' + ox.toFixed(1)
-           + '" cy="' + oy.toFixed(1) + '" r="3.2"/>';
-    hi.innerHTML = parts;
+    window._catalogGeoSync = syncSelectedRow;
 
-    const box = boxOf([id].concat(up[id] || []));
-    if (box) easeViewBox(frameToPx(box, 0.18));
-
-    const n = node[id] || {};
-    const bits = [];
-    if (n.length_km != null) bits.push(n.length_km + ' km');
-    if (n.area_km2) bits.push(n.area_km2 + ' km²');
-    const nUp = (up[id] || []).length;
-    bits.push(nUp ? nUp + ' rivers upstream' : 'headwater');
-    cap.innerHTML = '<b>' + escapeHtml(n.name || id) + '</b> · ' + bits.join(' · ')
-                  + ' · <a href="#" id="mapreset">⤢ whole catchment</a>';
-    document.getElementById('mapreset').addEventListener('click', ev => {
-      ev.preventDefault();
-      easeViewBox([0, 0, W, H]);
+    labelsEl.addEventListener('click', ev => {
+      const li = ev.target.closest('.row[data-id]');
+      if (li && !ev.target.closest('.caret') && geo.rivers[li.dataset.id])
+        select(li.dataset.id);
     });
 
-    if (current) current.classList.remove('selected');
-    const li = document.querySelector('.labels .row[data-id="' + cssEsc(id) + '"]');
-    if (li) { li.classList.add('selected'); current = li; }
-  }
+    if (geo.rivers[meta.root_id]) select(meta.root_id);
+  })();
 
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  }
-  function cssEsc(s) {
-    return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
-  }
-
-  document.querySelector('.labels').addEventListener('click', ev => {
-    const li = ev.target.closest('.row[data-id]');
-    if (li && geo.rivers[li.dataset.id]) select(li.dataset.id);
-  });
-
-  // start on the root so the network reads at a glance
-  if (geo.rivers[data.meta.root_id]) select(data.meta.root_id);
+  render();
 })();
 """
 
 
 def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) -> str:
-    """Return the self-contained git-graph HTML document for a catalog dict.
+    """Return the self-contained collapsible git-graph HTML document.
 
-    The graph draws whatever is in the catalog tree; wherever the tree was
-    already truncated (``tributaries_truncated``) a ``+N rivers`` leaf row
-    stands in. ``max_depth`` optionally folds the graph further, to keep a very
-    deep tree a sane height without rebuilding the JSON.
+    The document ships the catalog JSON plus a script that lays the graph out
+    in the browser and re-renders it on every order-slider move or caret
+    click. ``max_depth`` folds the tree beyond N confluences from the root,
+    exactly as before, and is passed through to the client.
     """
     meta = catalog.get("meta", {})
     root = catalog["root"]
     title = meta.get("root_name") or meta.get("root_id") or "valley catalog"
 
     has_geo = bool(catalog.get("geo") and catalog["geo"].get("rivers"))
-
-    layout = _Layout(root, max_depth=max_depth)
-    svg, lane_w = _draw_svg(layout)
-    labels = _labels_html(layout)
+    max_ord = max(_max_order(root), 1)
+    # open at an order that keeps the initial graph legible for a big basin
+    start_order = 1 if max_ord <= 4 else (2 if max_ord <= 6 else 3)
 
     if has_geo:
-        # map column: up to half the window, never below MAP_MIN
         map_w_css = f"clamp({MAP_MIN}px, {MAP_MAX_VW}vw, 50vw)"
-        grid_cols = f"{lane_w + LABEL_GAP}px minmax(220px, 1fr) {map_w_css}"
+        rest_cols = f"minmax(220px, 1fr) {map_w_css}"
         map_col = (
             f'<div class="mapcol"><div class="mapcard">'
             f'<svg id="map" viewBox="0 0 {MAP_VB_W} {MAP_VB_H}" '
@@ -625,20 +616,17 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
             f"</div></div>"
         )
     else:
-        grid_cols = f"{lane_w + LABEL_GAP}px 1fr"
+        rest_cols = "1fr"
         map_col = ""
 
-    n_drawn = sum(1 for r in layout.rows if not r.is_collapsed_leaf)
-    total = meta.get("n_nodes", n_drawn)
-    depth_note = (
-        f" · {n_drawn} of {total} rivers drawn (deeper branches folded to +N)"
-        if n_drawn < total
-        else f" · {n_drawn} rivers"
-    )
+    # a placeholder lane width; the script recomputes it on first render
+    grid_cols = f"{LANE_PAD + LANE_W + LABEL_GAP}px {rest_cols}"
+
     metaline = (
-        f"catchment of <b>{html.escape(title)}</b> as a river git-graph — "
-        f"each lane is one river, tinted by Strahler order; a lane curves into "
-        f"its parent where the two meet{depth_note}"
+        f"catchment of <b>{html.escape(title)}</b> as a collapsible river "
+        f"git-graph — each lane is one river, tinted by Strahler order; a lane "
+        f"turns into its parent where the two meet"
+        f'<span id="meta-extra"></span>'
         + (" · click a row to map its network" if has_geo else "")
     )
 
@@ -653,6 +641,18 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         map_ar=f"{MAP_VB_W} / {MAP_VB_H}",
         map_top=104,
     )
+
+    geom = {
+        "ROW_H": ROW_H, "LANE_W": LANE_W, "LANE_PAD": LANE_PAD, "DOT_R": DOT_R,
+        "LABEL_GAP": LABEL_GAP, "ELBOW_R": ELBOW_R, "BG": _BG,
+        "MAX_DEPTH": max_depth,
+        "REST_COLS": rest_cols,
+    }
+    js = (
+        _JS.replace("__GEOM__", json.dumps(geom))
+        .replace("__ORDER_STYLE__", json.dumps(_ORDER_STYLE))
+    )
+
     payload = json.dumps(catalog, ensure_ascii=False).replace("<", "\\u003c")
 
     return f"""<!doctype html>
@@ -669,14 +669,21 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
   <div class="meta">{metaline}</div>
   <div class="controls">
     <input id="filter" type="search" placeholder="filter by name…" autocomplete="off">
+    <label class="orderctl">min order <input id="order" type="range" min="1"
+      max="{max_ord}" value="{start_order}" step="1"><b id="order-val">{start_order}</b>
+      <span class="n">/ {max_ord}</span></label>
     <span class="legend">{legend}</span>
   </div>
 </header>
 <main>
-  <div class="graphwrap">{svg}{labels}{map_col}</div>
+  <div class="graphwrap">
+    <svg id="graph" class="graph" width="1" height="1" viewBox="0 0 1 1" aria-hidden="true"></svg>
+    <ol id="labels" class="labels"></ol>
+    {map_col}
+  </div>
 </main>
 <script id="catalog-data" type="application/json">{payload}</script>
-<script>{_JS}</script>
+<script>{js}</script>
 </body>
 </html>
 """

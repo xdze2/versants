@@ -326,35 +326,41 @@ def test_catalog_to_html_is_self_contained(branchy_rn):
     assert '<script id="catalog-data"' in doc
 
 
-def test_catalog_to_html_is_a_git_graph(branchy_rn):
+def test_catalog_to_html_is_a_collapsible_git_graph(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM")
     doc = catalog_to_html(cat)
-    # an inline SVG of lanes, plus a label list — one <li> per river in the tree
-    assert '<svg class="graph"' in doc
-    assert doc.count('<line ') >= 1 and "<circle " in doc
-    n_rivers = sum(1 for _ in walk(cat["root"]))
-    assert doc.count('<li class="row"') + doc.count('<li class="row leaf"') == n_rivers
+    # the graph is laid out in the browser: an empty <svg> + <ol> the script
+    # fills, the catalog JSON, and the client renderer that walks the tree
+    assert '<svg id="graph" class="graph"' in doc
+    assert '<ol id="labels" class="labels">' in doc
+    assert '<script id="catalog-data"' in doc
+    assert "function layout(" in doc and "function drawGraph(" in doc
+    # the order slider that folds low-order headwaters
+    assert 'id="order" type="range"' in doc
+    # every river's name is reachable from the embedded payload
+    for node in walk(cat["root"]):
+        if node.get("name"):
+            assert node["name"] in doc
 
 
-def test_catalog_to_html_max_depth_folds_to_leaves(branchy_rn):
-    # fold the graph at depth 0: only the root row survives, its whole catchment
-    # collapses into a single leaf row.
+def test_catalog_to_html_passes_max_depth_to_the_client(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM")
-    full = catalog_to_html(cat)
-    folded = catalog_to_html(cat, max_depth=0)
-    assert full.count('<li class="row') > folded.count('<li class="row')
-    assert '<li class="row leaf"' in folded  # a folded branch became a leaf
+    assert '"MAX_DEPTH": null' in catalog_to_html(cat)
+    assert '"MAX_DEPTH": 0' in catalog_to_html(cat, max_depth=0)
 
 
 def test_catalog_to_html_escapes_names(simple_rn):
     cat = build_catalog(simple_rn, "Main")
-    cat["root"]["name"] = "A & B <script>x</script>"
+    cat["meta"]["root_name"] = "A & B <em>x</em>"
+    cat["root"]["name"] = "Tricky <script>x</script>"
     doc = catalog_to_html(cat)
-    # rendered into the tree: HTML-escaped
-    assert "A &amp; B &lt;script&gt;x&lt;/script&gt;" in doc
-    # and the embedded JSON payload cannot break out of its <script> block
+    # the title/header run through html.escape
+    assert "A &amp; B &lt;em&gt;x&lt;/em&gt;" in doc
+    # a river name only reaches the page via the embedded JSON payload, whose
+    # every "<" is neutralised so it cannot open a tag inside the <script>
     assert "<script>x</script>" not in doc
     assert "</script>x" not in doc
+    assert "Tricky \\u003cscript>x\\u003c/script>" in doc
 
 
 # ---------------------------------------------------------------------- geo block
