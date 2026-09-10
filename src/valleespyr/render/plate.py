@@ -52,6 +52,18 @@ class PlateLayers:
     catchment: gpd.GeoSeries          # single-row, the clip boundary
     contours_minor: list[np.ndarray]
     contours_index: list[np.ndarray]
+    # optional sun-lit relief underlay, all in ``crs`` metres on one grid, ready
+    # for ``ax.imshow`` at ``relief_extent``. ``None`` unless ``hillshade=`` was
+    # passed. ``relief`` is the soft Lambert hillshade (0..1). ``core_shadow`` is
+    # the local self-shadow (n·L ≤ 0) — the hillshade already blacks this out, so
+    # the plate does not re-ink it; it is here for completeness / debugging.
+    # ``cast_shadow`` is the *projected* shadow alone (sun-facing ground blocked
+    # by higher terrain upwind, core-shadow removed) — the crisp overlay that
+    # carries information the hillshade does not.
+    relief: np.ndarray | None
+    core_shadow: np.ndarray | None
+    cast_shadow: np.ndarray | None
+    relief_extent: tuple[float, float, float, float] | None
     water_lines: gpd.GeoDataFrame
     water_areas: gpd.GeoDataFrame
     glaciers: gpd.GeoDataFrame
@@ -119,6 +131,88 @@ def _contour_polylines(
     return out
 
 
+# ---------------------------------------------------------------------- hillshade
+
+
+def _shaded_relief_layer(
+    band: np.ndarray,
+    transform,
+    dem_crs,
+    crs: str,
+    catchment_polygon: BaseGeometry,
+    sun: tuple[float, float],
+    shade_gain: float,
+) -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, tuple[float, float, float, float]
+]:
+    """Sun-lit relief for the clipped DEM, warped to ``crs``.
+
+    Returns ``(hillshade, core_shadow, cast_shadow, extent)`` on one grid, each
+    ``[0, 1]`` with NaN outside the divide, plus the ``imshow`` extent in
+    ``crs``. ``core_shadow`` is the local self-shadow (already carried by the
+    hillshade); ``cast_shadow`` is the projected shadow with the core removed —
+    the crisp part :func:`_draw_relief` overlays. The shadow passes use the true
+    DEM and true sun altitude; ``shade_gain`` steepens the hillshade only
+    (cartographic, 1.0 = faithful).
+
+    Cell size in metres comes from the pixel size and the metres-per-degree at
+    this latitude when the DEM is geographic. Arrays are masked to
+    ``catchment_polygon`` (the ``rio_mask`` clip keeps a pad apron and the
+    fictif outlet adds a stray tongue) and then warped into ``crs`` so they
+    register pixel-exact with the line work — a lat/lon bbox is not a rectangle
+    in Lambert-93.
+    """
+    from rasterio.features import geometry_mask
+    from rasterio.warp import Resampling, calculate_default_transform, reproject
+
+    from .hillshade import shaded_relief
+
+    rows, cols = band.shape
+    west, north = transform.c, transform.f
+    px, py = transform.a, -transform.e
+
+    if getattr(dem_crs, "is_geographic", False):
+        lat_mid = north - rows * py / 2
+        dx = px * 111_320.0 * float(np.cos(np.radians(lat_mid)))
+        dy = py * 110_540.0
+    else:  # already metric
+        dx, dy = px, py
+
+    hs, core, cast = shaded_relief(
+        band, dx=dx, dy=dy,
+        sun_azimuth=sun[0], sun_altitude=sun[1],
+        shade_gain=shade_gain, soft_px=1.0,
+    )
+
+    outside = geometry_mask(
+        [catchment_polygon], out_shape=band.shape, transform=transform, invert=False
+    )
+    hs = np.where(outside, np.nan, hs)
+    core = np.where(outside, np.nan, core)
+    cast = np.where(outside, np.nan, cast)
+
+    dst_transform, dw, dh = calculate_default_transform(
+        dem_crs, crs, cols, rows, west, north - rows * py, west + cols * px, north
+    )
+
+    def _warp(src: np.ndarray) -> np.ndarray:
+        out = np.full((dh, dw), np.nan, dtype="float64")
+        reproject(
+            source=src, destination=out,
+            src_transform=transform, src_crs=dem_crs,
+            dst_transform=dst_transform, dst_crs=crs,
+            src_nodata=np.nan, dst_nodata=np.nan,
+            resampling=Resampling.bilinear,
+        )
+        return out
+
+    x0 = dst_transform.c
+    y1 = dst_transform.f
+    x1 = x0 + dw * dst_transform.a
+    y0 = y1 + dh * dst_transform.e
+    return _warp(hs), _warp(core), _warp(cast), (x0, x1, y0, y1)
+
+
 # ------------------------------------------------------------------------- prepare
 
 
@@ -145,6 +239,8 @@ def prepare_layers(
     *,
     title: str,
     crs: str = "EPSG:2154",
+    hillshade: tuple[float, float] | None = None,
+    shade_gain: float = 1.0,
 ) -> PlateLayers:
     """Project, clip and contour everything for one valley plate.
 
@@ -157,6 +253,12 @@ def prepare_layers(
     Everything is reprojected to ``crs`` (Lambert-93 by default — right for the
     French Pyrénées; pass a UTM CRS for a wider basin) and clipped to the
     catchment outline.
+
+    Pass ``hillshade=(sun_azimuth_deg, sun_altitude_deg)`` to also compute a
+    sun-lit relief underlay (Lambert hillshade + core/cast shadow split, all
+    numpy — no Blender). The shadow passes use the true DEM and true sun
+    altitude; ``shade_gain`` steepens the hillshade only, a cartographic slope
+    exaggeration for legibility (1.0 = physically faithful).
     """
     catch_ll = gpd.GeoSeries([catchment_polygon], crs="EPSG:4326")
     catch = catch_ll.to_crs(crs)
@@ -191,6 +293,17 @@ def prepare_layers(
             x, y = tf(poly[:, 0], poly[:, 1])
             bucket.append(np.column_stack([x, y]))
 
+    # --- optional sun-lit relief underlay --------------------------------
+    relief: np.ndarray | None = None
+    core_shadow: np.ndarray | None = None
+    cast_shadow: np.ndarray | None = None
+    relief_extent: tuple[float, float, float, float] | None = None
+    if hillshade is not None:
+        relief, core_shadow, cast_shadow, relief_extent = _shaded_relief_layer(
+            band, transform, dem_crs, crs, catchment_polygon,
+            hillshade, shade_gain,
+        )
+
     # --- BD TOPO catchment streams (GeoJSON -> GDF) -------------------------
     streams = gpd.GeoDataFrame.from_features(
         streams_fc.get("features", []), crs="EPSG:4326"
@@ -207,6 +320,10 @@ def prepare_layers(
         catchment=catch,
         contours_minor=minor,
         contours_index=index,
+        relief=relief,
+        core_shadow=core_shadow,
+        cast_shadow=cast_shadow,
+        relief_extent=relief_extent,
         water_lines=L("water_lines"),
         water_areas=L("water_areas"),
         glaciers=L("glaciers"),
@@ -335,6 +452,52 @@ def _place_labels(ax, items: list[tuple[float, float, str, dict]], span: float) 
         ax.annotate(text, (x + dx, y), **kw)
 
 
+def _draw_relief(
+    ax,
+    layers: PlateLayers,
+    *,
+    hillshade_strength: float = 0.28,
+    cast_strength: float = 0.62,
+) -> None:
+    """Paint the relief under the line work.
+
+    Two ideas, kept separate:
+
+    * The diffuse Lambert **hillshade** goes down faint (``hillshade_strength`` =
+      alpha of its darkest slope) — enough to model every slope, low enough not
+      to compete with the contours. It *already* carries the **core shadow**
+      (the lee of each ridge is where ``n·L`` hits zero), so that gets no extra
+      ink.
+    * The **cast shadow** — sun-facing ground blocked by higher terrain upwind,
+      with the core shadow removed — goes on top at ``cast_strength`` in a
+      cooler slate ink. This is the part the hillshade cannot show: it marks
+      "low sun, hidden behind that headwall", and because it is a crisp,
+      bounded shape it stays legible against the isolines.
+    """
+    import numpy as _np
+    from matplotlib.colors import to_rgb
+
+    x0, x1, y0, y1 = layers.relief_extent
+    common = dict(extent=(x0, x1, y0, y1), origin="upper",
+                  interpolation="bilinear", clip_on=True)
+
+    if layers.relief is not None:
+        r = _np.clip(layers.relief, 0.0, 1.0)
+        shade = _np.where(_np.isfinite(r), 1.0 - r, 0.0)
+        rgba = _np.zeros((*shade.shape, 4), dtype=float)
+        rgba[..., :3] = to_rgb("#6b6152")          # warm neutral
+        rgba[..., 3] = shade * hillshade_strength
+        ax.imshow(rgba, zorder=0.4, **common)
+
+    if layers.cast_shadow is not None:
+        s = _np.clip(layers.cast_shadow, 0.0, 1.0)
+        s = _np.where(_np.isfinite(s), s, 0.0)
+        rgba = _np.zeros((*s.shape, 4), dtype=float)
+        rgba[..., :3] = to_rgb("#39414d")          # cool slate, reads as shadow
+        rgba[..., 3] = s * cast_strength
+        ax.imshow(rgba, zorder=0.5, **common)
+
+
 def draw_plate(
     layers: PlateLayers,
     out_svg: Path,
@@ -367,6 +530,10 @@ def draw_plate(
     ax.set_yticks([])
     for s in ax.spines.values():
         s.set_visible(False)
+
+    # --- sun-lit relief underlay (optional, below everything) -------------
+    if layers.relief is not None and layers.relief_extent is not None:
+        _draw_relief(ax, layers)
 
     # --- fills (bottom) ----------------------------------------------------
     _draw_polys(ax, layers.glaciers, **_STYLE["glacier_fill"], zorder=1)
@@ -603,10 +770,17 @@ def build_plate(
     subtitle: str = "",
     crs: str = "EPSG:2154",
     write_png: bool = True,
+    hillshade: tuple[float, float] | None = None,
+    shade_gain: float = 1.0,
 ) -> list[Path]:
-    """Prepare + draw a valley topo plate in one call. Returns the paths written."""
+    """Prepare + draw a valley topo plate in one call. Returns the paths written.
+
+    ``hillshade=(sun_azimuth, sun_altitude)`` adds the sun-lit relief underlay;
+    ``shade_gain`` steepens the hillshade only (1.0 = physically faithful).
+    """
     layers = prepare_layers(
-        catchment_polygon, dem_tif, streams_fc, osm, title=title, crs=crs
+        catchment_polygon, dem_tif, streams_fc, osm, title=title, crs=crs,
+        hillshade=hillshade, shade_gain=shade_gain,
     )
     return draw_plate(layers, out_svg, subtitle=subtitle, write_png=write_png)
 

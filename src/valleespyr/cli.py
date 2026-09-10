@@ -742,6 +742,25 @@ def valley_render(
 @click.option(
     "--refresh-osm", is_flag=True, help="Re-query Overpass even if the extent is cached."
 )
+@click.option(
+    "--hillshade",
+    is_flag=True,
+    help="Add a sun-lit relief underlay (numpy hillshade + core/cast shadow, no Blender).",
+)
+@click.option(
+    "--sun-azimuth", type=float, default=315.0, show_default=True,
+    help="Sun compass bearing for --hillshade (0 = from the north, clockwise).",
+)
+@click.option(
+    "--sun-altitude", type=float, default=28.0, show_default=True,
+    help="Sun height above the horizon, degrees, for --hillshade. Low (25-32) "
+         "gives real cast shadows on true-scale 30 m terrain; high washes them out.",
+)
+@click.option(
+    "--shade-gain", type=float, default=1.0, show_default=True,
+    help="Cartographic slope exaggeration for the hillshade only (1.0 = faithful; "
+         "never affects the shadow geometry).",
+)
 @click.option("-o", "--output", required=True, help="Destination .svg file.")
 @click.pass_context
 def valley_plate(
@@ -755,6 +774,10 @@ def valley_plate(
     crs: str,
     no_png: bool,
     refresh_osm: bool,
+    hillshade: bool,
+    sun_azimuth: float,
+    sun_altitude: float,
+    shade_gain: float,
     output: str,
 ) -> None:
     """Render one river's catchment as a minimal black-and-white topo plate.
@@ -764,6 +787,13 @@ def valley_plate(
     summits and cols — from OpenStreetMap, and draws it all as an SVG (+ a
     sibling PNG unless ``--no-png``). Needs ``OPENTOPOGRAPHY_API_KEY`` set; the
     DEM tile and the Overpass response are both cached under ``data/raw``.
+
+    With ``--hillshade`` the DEM is also draped in a sun-lit relief wash: a
+    faint Lambert hillshade (which already carries the self-/core shadow on the
+    lee of every ridge) plus a crisp *cast* shadow overlay where sun-facing
+    ground is blocked by higher terrain upwind. All numpy — no Blender
+    subprocess. ``--sun-azimuth`` / ``--sun-altitude`` place the light; the
+    shadow geometry uses the true DEM at the true sun altitude.
     """
     from pathlib import Path
 
@@ -813,6 +843,8 @@ def valley_plate(
         subtitle=subtitle,
         crs=crs,
         write_png=not no_png,
+        hillshade=(sun_azimuth, sun_altitude) if hillshade else None,
+        shade_gain=shade_gain,
     )
     for p in written:
         click.echo(f"wrote {p}", err=True)
