@@ -15,6 +15,11 @@ column of labels (name + length / order / upstream count / Pfafstetter code).
 Beyond ``--max-depth`` a branch collapses to one ``+N rivers`` leaf row. No
 server, no CDN: inline CSS + a few lines of JS for a name filter.
 
+When the catalog carries a ``geo`` block (``valleespyr catalog --geo``) a third
+column holds a sticky mini-map: clicking a row draws just that river and its
+upstream network there, lon/lat projected in the browser, fit to frame — the
+"listing on the left, selected valley on the right" view.
+
 ``render_catalog_html(catalog, path)`` writes the file; ``catalog_to_html`` gives
 the string.
 """
@@ -33,6 +38,13 @@ LANE_W = 15         # px per lane column
 LANE_PAD = 10       # left padding before lane 0
 DOT_R = 3.2         # merge/branch dot radius
 LABEL_GAP = 14      # px between the lane area and the label column
+# Mini-map (only with a geo block). The column is fluid — up to half the
+# window, never below MAP_MIN — while MAP_VB is the fixed SVG coordinate box the
+# projection maths works in; the element just scales to fit its column.
+MAP_MIN = 340       # px — floor for the map column on narrow windows
+MAP_MAX_VW = 50     # % of window width — ceiling for the map column
+MAP_VB_W = 720      # SVG viewBox width  (internal units)
+MAP_VB_H = 760      # SVG viewBox height (internal units)
 
 # Strahler order -> (stroke width, colour). Clamped to the table ends.
 _ORDER_STYLE = [
@@ -351,15 +363,43 @@ h1 {{ margin: 0 0 2px; font-size: 17px; font-weight: 600; }}
 main {{ padding: 8px 22px 60px; }}
 .graphwrap {{
   position: relative; display: grid;
-  grid-template-columns: {lane_w}px 1fr; align-items: start;
+  grid-template-columns: {grid_cols}; align-items: start;
 }}
 svg.graph {{ display: block; position: sticky; left: 0; }}
 ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .labels .row {{
   display: flex; align-items: center; gap: 10px;
-  padding: 0 8px; white-space: nowrap;
+  padding: 0 8px; white-space: nowrap; cursor: default;
 }}
 .labels .row:hover {{ background: #fff; box-shadow: inset 0 0 0 1px var(--line); }}
+.has-geo .labels .row {{ cursor: pointer; }}
+.labels .row.selected {{ background: #fff; box-shadow: inset 2px 0 0 var(--accent); }}
+
+.mapcol {{ position: sticky; top: {map_top}px; align-self: start; }}
+.mapcard {{
+  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  overflow: hidden; width: 100%;
+}}
+/* the SVG keeps the viewBox aspect ratio and scales to the fluid column */
+#map {{ display: block; width: 100%; height: auto;
+  aspect-ratio: {map_ar}; background: #fbfcfd; }}
+/* strokes stay a constant screen width as the viewBox zooms in */
+#map path, #map circle {{ vector-effect: non-scaling-stroke; }}
+#map .ctx {{ fill: none; stroke: #d3dae1; stroke-width: 1;
+  stroke-linecap: round; stroke-linejoin: round; }}
+#map .up {{ fill: none; stroke: #94a3b1; stroke-width: 1.3;
+  stroke-linecap: round; stroke-linejoin: round; }}
+#map .sel {{ fill: none; stroke: var(--accent); stroke-linecap: round;
+  stroke-linejoin: round; stroke-width: 2.8; }}
+#map .outlet {{ fill: var(--accent); stroke: #fff; stroke-width: 1; }}
+.mapcap {{
+  padding: 8px 10px; border-top: 1px solid var(--line); font-size: 11.5px;
+  color: var(--dim); line-height: 1.5; min-height: 34px;
+}}
+.mapcap b {{ color: var(--ink); }}
+.mapcap a {{ color: var(--accent); text-decoration: none; white-space: nowrap; }}
+.mapcap a:hover {{ text-decoration: underline; }}
+.mapcap .hint {{ color: var(--faint); }}
 .name {{ font-weight: 600; }}
 .name.unnamed {{ color: var(--faint); font-weight: 400;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }}
@@ -394,6 +434,163 @@ _JS = r"""
       }
     });
   });
+
+  // --- catchment mini-map (only when the catalog carries a geo block) --------
+  // The whole river network is drawn once, faint, in a fixed projection keyed
+  // to the catchment bbox. Selecting a row paints that river + its upstream
+  // network on top and eases the SVG viewBox in to frame the selection, so a
+  // small tributary fills the panel with the rest of the basin still visible
+  // behind it.
+  const data = JSON.parse(document.getElementById('catalog-data').textContent);
+  const geo = data.geo;
+  const svg = document.getElementById('map');
+  if (!geo || !geo.rivers || !geo.bbox || !svg) return;
+  document.body.classList.add('has-geo');
+
+  const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height, PAD = 14;
+
+  // id -> node, and id -> [upstream ids], from one walk of the tree
+  const node = {}, up = {};
+  (function walk(n) {
+    node[n.id] = n;
+    const kids = [];
+    if (n.mainline) kids.push(n.mainline);
+    for (const t of n.tributaries || []) kids.push(t);
+    let acc = [];
+    for (const k of kids) acc = acc.concat(walk(k));
+    up[n.id] = acc;
+    return acc.concat([n.id]);
+  })(data.root);
+
+  // fixed lon/lat -> px, catchment bbox letterboxed into the full viewBox
+  const [BW, BS, BE, BN] = geo.bbox;
+  const bdx = (BE - BW) || 1e-6, bdy = (BN - BS) || 1e-6;
+  const K = Math.min((W - 2 * PAD) / bdx, (H - 2 * PAD) / bdy);
+  const OX = (W - K * bdx) / 2, OY = (H - K * bdy) / 2;
+  const px = lon => OX + (lon - BW) * K;
+  const py = lat => OY + (BN - lat) * K;  // flip Y
+
+  function pathD(subs) {
+    let d = '';
+    for (const sub of subs) {
+      d += sub.map((p, i) =>
+        (i ? 'L' : 'M') + px(p[0]).toFixed(1) + ' ' + py(p[1]).toFixed(1)).join('');
+    }
+    return d;
+  }
+  function boxOf(ids) {
+    let w = Infinity, s = Infinity, e = -Infinity, nn = -Infinity;
+    for (const id of ids) {
+      const g = geo.rivers[id];
+      if (!g) continue;
+      for (const sub of g.line) for (const [lon, lat] of sub) {
+        if (lon < w) w = lon; if (lon > e) e = lon;
+        if (lat < s) s = lat; if (lat > nn) nn = lat;
+      }
+    }
+    return isFinite(w) ? [w, s, e, nn] : null;
+  }
+
+  // static context layer: every river once, hairline
+  let ctx = '';
+  for (const id in geo.rivers) ctx += '<path class="ctx" d="' + pathD(geo.rivers[id].line) + '"/>';
+  svg.innerHTML = '<g class="ctxg">' + ctx + '</g><g class="hi"></g>';
+  const hi = svg.querySelector('.hi');
+
+  // viewBox easing (viewBox isn't CSS-animatable everywhere). The final frame
+  // is written up front so the map is correct even if rAF is throttled (some
+  // headless / background contexts); rAF then just fills in the motion.
+  let anim = null;
+  function setViewBox(v) { svg.setAttribute('viewBox', v.map(n => n.toFixed(1)).join(' ')); }
+  function easeViewBox(to) {
+    const from = [svg.viewBox.baseVal.x, svg.viewBox.baseVal.y,
+                  svg.viewBox.baseVal.width, svg.viewBox.baseVal.height];
+    if (anim) cancelAnimationFrame(anim);
+    if (!window.requestAnimationFrame) { setViewBox(to); return; }
+    const t0 = performance.now(), dur = 260;
+    setViewBox(to);  // commit the destination immediately
+    (function step(now) {
+      let u = Math.min(1, (now - t0) / dur);
+      u = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;  // easeInOutQuad
+      setViewBox(from.map((f, i) => f + (to[i] - f) * u));
+      if (u < 1) anim = requestAnimationFrame(step);
+      else setViewBox(to);
+    })(t0);
+  }
+  // don't zoom past this: a lone headwater still keeps a chunk of the
+  // surrounding network in frame for context (¼ of the panel, min)
+  const MIN_SPAN = Math.min(W, H) * 0.42;
+  function frameToPx(box, marginFrac) {
+    // selection lon/lat box -> a padded px viewBox, clamped to the full extent
+    let cx = (px(box[0]) + px(box[2])) / 2, cy = (py(box[1]) + py(box[3])) / 2;
+    let w = Math.abs(px(box[2]) - px(box[0])), h = Math.abs(py(box[1]) - py(box[3]));
+    w += 2 * Math.max(w, h) * marginFrac;
+    h += 2 * Math.max(w, h) * marginFrac;
+    w = Math.max(w, MIN_SPAN);
+    h = Math.max(h, MIN_SPAN);
+    // grow to the panel's aspect ratio, then position by centre
+    const ar = W / H;
+    if (w / h < ar) w = h * ar; else h = w / ar;
+    let x0 = cx - w / 2, y0 = cy - h / 2;
+    // clamp inside 0..W / 0..H
+    if (w >= W) { x0 = 0; w = W; } else x0 = Math.max(0, Math.min(x0, W - w));
+    if (h >= H) { y0 = 0; h = H; } else y0 = Math.max(0, Math.min(y0, H - h));
+    return [x0, y0, w, h];
+  }
+
+  const cap = document.getElementById('mapcap');
+  let current = null;
+
+  function select(id) {
+    const g = geo.rivers[id];
+    if (!g) return;
+
+    let parts = '';
+    for (const uid of up[id] || []) {
+      const ug = geo.rivers[uid];
+      if (ug) parts += '<path class="up" d="' + pathD(ug.line) + '"/>';
+    }
+    parts += '<path class="sel" d="' + pathD(g.line) + '"/>';
+    const ox = px(g.outlet[0]), oy = py(g.outlet[1]);
+    parts += '<circle class="outlet" cx="' + ox.toFixed(1)
+           + '" cy="' + oy.toFixed(1) + '" r="3.2"/>';
+    hi.innerHTML = parts;
+
+    const box = boxOf([id].concat(up[id] || []));
+    if (box) easeViewBox(frameToPx(box, 0.18));
+
+    const n = node[id] || {};
+    const bits = [];
+    if (n.length_km != null) bits.push(n.length_km + ' km');
+    if (n.area_km2) bits.push(n.area_km2 + ' km²');
+    const nUp = (up[id] || []).length;
+    bits.push(nUp ? nUp + ' rivers upstream' : 'headwater');
+    cap.innerHTML = '<b>' + escapeHtml(n.name || id) + '</b> · ' + bits.join(' · ')
+                  + ' · <a href="#" id="mapreset">⤢ whole catchment</a>';
+    document.getElementById('mapreset').addEventListener('click', ev => {
+      ev.preventDefault();
+      easeViewBox([0, 0, W, H]);
+    });
+
+    if (current) current.classList.remove('selected');
+    const li = document.querySelector('.labels .row[data-id="' + cssEsc(id) + '"]');
+    if (li) { li.classList.add('selected'); current = li; }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  }
+  function cssEsc(s) {
+    return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
+  }
+
+  document.querySelector('.labels').addEventListener('click', ev => {
+    const li = ev.target.closest('.row[data-id]');
+    if (li && geo.rivers[li.dataset.id]) select(li.dataset.id);
+  });
+
+  // start on the root so the network reads at a glance
+  if (geo.rivers[data.meta.root_id]) select(data.meta.root_id);
 })();
 """
 
@@ -410,9 +607,26 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
     root = catalog["root"]
     title = meta.get("root_name") or meta.get("root_id") or "valley catalog"
 
+    has_geo = bool(catalog.get("geo") and catalog["geo"].get("rivers"))
+
     layout = _Layout(root, max_depth=max_depth)
     svg, lane_w = _draw_svg(layout)
     labels = _labels_html(layout)
+
+    if has_geo:
+        # map column: up to half the window, never below MAP_MIN
+        map_w_css = f"clamp({MAP_MIN}px, {MAP_MAX_VW}vw, 50vw)"
+        grid_cols = f"{lane_w + LABEL_GAP}px minmax(220px, 1fr) {map_w_css}"
+        map_col = (
+            f'<div class="mapcol"><div class="mapcard">'
+            f'<svg id="map" viewBox="0 0 {MAP_VB_W} {MAP_VB_H}" '
+            f'preserveAspectRatio="xMidYMid meet" aria-label="selected river network"></svg>'
+            f'<div id="mapcap" class="mapcap"><span class="hint">click a river…</span></div>'
+            f"</div></div>"
+        )
+    else:
+        grid_cols = f"{lane_w + LABEL_GAP}px 1fr"
+        map_col = ""
 
     n_drawn = sum(1 for r in layout.rows if not r.is_collapsed_leaf)
     total = meta.get("n_nodes", n_drawn)
@@ -425,6 +639,7 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         f"catchment of <b>{html.escape(title)}</b> as a river git-graph — "
         f"each lane is one river, tinted by Strahler order; a lane curves into "
         f"its parent where the two meet{depth_note}"
+        + (" · click a row to map its network" if has_geo else "")
     )
 
     legend = "".join(
@@ -433,7 +648,11 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         for i, (w, c) in enumerate(_ORDER_STYLE)
     )
 
-    css = _CSS_TMPL.format(lane_w=lane_w + LABEL_GAP)
+    css = _CSS_TMPL.format(
+        grid_cols=grid_cols,
+        map_ar=f"{MAP_VB_W} / {MAP_VB_H}",
+        map_top=104,
+    )
     payload = json.dumps(catalog, ensure_ascii=False).replace("<", "\\u003c")
 
     return f"""<!doctype html>
@@ -454,7 +673,7 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
   </div>
 </header>
 <main>
-  <div class="graphwrap">{svg}{labels}</div>
+  <div class="graphwrap">{svg}{labels}{map_col}</div>
 </main>
 <script id="catalog-data" type="application/json">{payload}</script>
 <script>{_JS}</script>

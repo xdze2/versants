@@ -941,6 +941,12 @@ def valley_plate(
     help="Keep icon outlines north-up instead of rotating each so its outlet points down.",
 )
 @click.option(
+    "--geo",
+    is_flag=True,
+    help="Embed a simplified [lon, lat] centreline + outlet per river, so the HTML "
+    "gets a click-to-draw mini-map of the selected river's network.",
+)
+@click.option(
     "-o", "--output", default=None, help="Write the catalog JSON here (default: stdout)."
 )
 @click.option(
@@ -958,6 +964,7 @@ def catalog_cmd(
     bassins_path: str | None,
     max_depth: int | None,
     no_orient_outlet_down: bool,
+    geo: bool,
     output: str | None,
     html_output: str | None,
 ) -> None:
@@ -968,7 +975,8 @@ def catalog_cmd(
     continuing) and ``tributaries`` (branches merging in), carries length,
     Strahler order, valleys upstream and a study-local Pfafstetter code, and —
     with ``--bassins`` — a drainage ``area_km2``. ``--html`` renders it as a
-    static git-graph: one lane per river, tinted by Strahler order.
+    static git-graph: one lane per river, tinted by Strahler order; add
+    ``--geo`` and each row also draws the selected river's network on a map.
     """
     from .catalog import build_catalog
     from .render.catalog_html import render_catalog_html
@@ -988,6 +996,7 @@ def catalog_cmd(
             bassins=bassins,
             max_depth=max_depth,
             orient_outlet_down=not no_orient_outlet_down,
+            geo=geo,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc

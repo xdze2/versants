@@ -33,6 +33,12 @@ upstream, a study-local Pfafstetter code, and — where a
 ``area_km2`` and a normalised catchment-outline SVG path (``icon``) for callers
 that want one; the bundled HTML renderer ignores the icon.
 
+With ``geo=True`` the catalog also gets a flat ``geo`` block: the catchment
+bbox plus, per river id, its own tronçon centreline as one or more simplified
+``[lon, lat]`` sub-lines and its outlet coordinate. That is what the HTML
+renderer's mini-map draws — the whole catchment faint, the selected river and
+its upstream network picked out on top, projected client-side, no tiles.
+
 Pure graph + shapely. ``bassins`` is a :class:`geopandas.GeoDataFrame` (loaded
 by :func:`valleespyr.watershed.load_bassins`); without it ``area_km2`` / ``icon``
 are ``None``.
@@ -66,6 +72,14 @@ _ICON_DECIMALS = 1
 # --------------------------------------------------------------------------- public
 
 
+# Map centrelines: each river's own tronçon line is simplified until it has at
+# most this many vertices (Douglas-Peucker in degrees, ~1e-4° ≈ 10 m), then
+# stored as rounded [lon, lat] pairs. Enough to read the valley's shape in a
+# ~600px mini-map without bloating the JSON.
+_GEO_MAX_VERTICES = 40
+_GEO_DECIMALS = 5
+
+
 def build_catalog(
     rn: RiverNetwork,
     root_query: str,
@@ -73,6 +87,7 @@ def build_catalog(
     bassins: gpd.GeoDataFrame | None = None,
     max_depth: int | None = None,
     orient_outlet_down: bool = True,
+    geo: bool = False,
 ) -> dict[str, Any]:
     """Build the nested-dict catalog rooted at ``root_query``.
 
@@ -94,8 +109,15 @@ def build_catalog(
     sits at the bottom of the glyph — every valley then reads "water leaves
     here" the same way.
 
-    Returns a dict with ``root`` (the tree) and ``meta`` (counts, the root id,
-    whether icons were generated).
+    With ``geo=True`` a ``geo`` block is added: ``bbox`` (``[w, s, e, n]`` over
+    the whole catchment) and ``rivers`` (``id -> {"line": [[[lon, lat], …], …],
+    "outlet": [lon, lat]}``), each ``line`` the river's own tronçon centreline
+    as one or more simplified sub-lines (split only across a lake / missing
+    reach). The HTML renderer draws the whole catchment faint and picks the
+    selected river plus its upstream network out on top.
+
+    Returns a dict with ``root`` (the tree), ``meta`` (counts, the root id,
+    whether icons were generated) and — with ``geo=True`` — ``geo``.
     """
     from valleespyr.valley import resolve_river
 
@@ -160,7 +182,7 @@ def build_catalog(
         return node
 
     tree = visit(root, 0)
-    return {
+    out: dict[str, Any] = {
         "root": tree,
         "meta": {
             "root_id": root.id,
@@ -169,9 +191,119 @@ def build_catalog(
             "n_icons": n_icons,
             "has_icons": bassins is not None,
             "orient_outlet_down": orient_outlet_down and bassins is not None,
+            "has_geo": geo,
             "model": "git",
         },
     }
+    if geo:
+        out["geo"] = _build_geo(rn, tree)
+    return out
+
+
+# ------------------------------------------------------------------- map geometry
+
+
+def _build_geo(rn: RiverNetwork, tree: dict[str, Any]) -> dict[str, Any]:
+    """``{"bbox": [w, s, e, n], "rivers": {id: {"line", "outlet"}}}`` for a tree.
+
+    One entry per river node in ``tree``. ``line`` is the river's own tronçon
+    centreline as a list of simplified sub-lines (``[[[lon, lat], …], …]``) —
+    one per chain ``shapely.linemerge`` stitches from the river's tronçons; a
+    braided reach or a node where three same-river reaches meet yields several,
+    which drawn together still read as one river. ``outlet`` is the river's
+    mouth coordinate. ``bbox`` spans every sub-line and every outlet.
+    """
+    from valleespyr.valley import outlet_point
+
+    rivers: dict[str, dict[str, Any]] = {}
+    w = s = e = n = None
+
+    def note(lon: float, lat: float) -> None:
+        nonlocal w, s, e, n
+        w = lon if w is None else min(w, lon)
+        e = lon if e is None else max(e, lon)
+        s = lat if s is None else min(s, lat)
+        n = lat if n is None else max(n, lat)
+
+    for node in _walk_tree(tree):
+        rid = node["id"]
+        if rid in rivers:
+            continue
+        parts = _river_lines(rn, rid)
+        if not parts:
+            continue
+        try:
+            olon, olat = outlet_point(rn, rid)
+            outlet = [round(olon, _GEO_DECIMALS), round(olat, _GEO_DECIMALS)]
+        except Exception:  # pragma: no cover - outlet geometry hiccup
+            logger.debug("geo outlet failed for %s", rid, exc_info=True)
+            outlet = parts[-1][-1]
+        rivers[rid] = {"line": parts, "outlet": outlet}
+        for part in parts:
+            for lon, lat in part:
+                note(lon, lat)
+        note(*outlet)
+
+    bbox = [w, s, e, n] if w is not None else None
+    return {"bbox": bbox, "rivers": rivers}
+
+
+def _walk_tree(node: dict[str, Any]):
+    """Every river node in a git-model catalog tree (node, mainline, tributaries)."""
+    yield node
+    if node.get("mainline") is not None:
+        yield from _walk_tree(node["mainline"])
+    for t in node.get("tributaries") or []:
+        yield from _walk_tree(t)
+
+
+def _river_lines(rn: RiverNetwork, river_id: str) -> list[list[list[float]]]:
+    """The river's own centreline as a list of simplified sub-lines (may be empty).
+
+    ``shapely.linemerge`` stitches the river's tronçons into as few chains as it
+    can — one where the reaches form a simple path, several where they braid or
+    a node joins three reaches of the same river. Every chain is kept (they
+    share endpoints, so drawn together they read as one river) and each is
+    Douglas-Peucker-simplified toward ``_GEO_MAX_VERTICES``.
+    """
+    from shapely.geometry import LineString, MultiLineString, shape
+    from shapely.ops import linemerge
+
+    fc = rn.river_path_geojson(river_id)
+    lines = [
+        shape(f["geometry"])
+        for f in fc.get("features", [])
+        if f.get("geometry", {}).get("type") in ("LineString", "MultiLineString")
+    ]
+    if not lines:
+        return []
+
+    merged = linemerge(lines) if len(lines) > 1 else lines[0]
+    if isinstance(merged, LineString):
+        chains = [merged]
+    elif isinstance(merged, MultiLineString):
+        chains = [g for g in merged.geoms if not g.is_empty]
+    else:  # pragma: no cover - defensive
+        return []
+
+    out: list[list[list[float]]] = []
+    for line in chains:
+        if len(line.coords) < 2:
+            continue
+        simple = line
+        tol = 1e-4  # ~10 m
+        for _ in range(12):
+            if len(simple.coords) <= _GEO_MAX_VERTICES:
+                break
+            simple = line.simplify(tol, preserve_topology=False)
+            tol *= 1.8
+            if simple.is_empty or len(simple.coords) < 2:
+                simple = line
+                break
+        out.append(
+            [[round(x, _GEO_DECIMALS), round(y, _GEO_DECIMALS)] for x, y in simple.coords]
+        )
+    return out
 
 
 # ---------------------------------------------------------------- git structure

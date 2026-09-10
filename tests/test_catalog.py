@@ -357,6 +357,70 @@ def test_catalog_to_html_escapes_names(simple_rn):
     assert "</script>x" not in doc
 
 
+# ---------------------------------------------------------------------- geo block
+
+
+def test_no_geo_by_default(branchy_rn):
+    cat = build_catalog(branchy_rn, "CDE_STEM")
+    assert "geo" not in cat
+    assert cat["meta"]["has_geo"] is False
+
+
+def test_geo_block_shape(branchy_rn):
+    cat = build_catalog(branchy_rn, "CDE_STEM", geo=True)
+    assert cat["meta"]["has_geo"] is True
+    geo = cat["geo"]
+
+    w, s, e, n = geo["bbox"]
+    assert w < e and s < n
+
+    tree_ids = {node["id"] for node in walk(cat["root"])}
+    assert set(geo["rivers"]) <= tree_ids
+    assert cat["root"]["id"] in geo["rivers"]
+
+    for g in geo["rivers"].values():
+        subs = g["line"]  # list of sub-lines, one per connected piece
+        assert isinstance(subs, list) and subs
+        for sub in subs:
+            assert len(sub) >= 2
+            assert all(len(pt) == 2 for pt in sub)
+            assert all(w <= x <= e and s <= y <= n for x, y in sub)
+        assert len(g["outlet"]) == 2
+
+
+def test_geo_lines_are_simplified(branchy_rn):
+    geo = build_catalog(branchy_rn, "CDE_STEM", geo=True)["geo"]
+    from valleespyr.catalog import _GEO_MAX_VERTICES
+
+    for g in geo["rivers"].values():
+        assert all(len(sub) <= _GEO_MAX_VERTICES for sub in g["line"])
+
+
+def test_geo_line_pieces_share_endpoints(branchy_rn):
+    """When a river comes back as several sub-lines they still join up — every
+    sub-line after the first starts where some other sub-line ends."""
+    geo = build_catalog(branchy_rn, "CDE_STEM", geo=True)["geo"]
+    for g in geo["rivers"].values():
+        subs = g["line"]
+        if len(subs) < 2:
+            continue
+        ends = {tuple(sub[0]) for sub in subs} | {tuple(sub[-1]) for sub in subs}
+        for sub in subs:
+            assert tuple(sub[0]) in ends and tuple(sub[-1]) in ends
+
+
+def test_geo_html_gets_a_map(branchy_rn):
+    cat = build_catalog(branchy_rn, "CDE_STEM", geo=True)
+    doc = catalog_to_html(cat)
+    assert 'id="map"' in doc and 'class="mapcol"' in doc
+    assert "has-geo" in doc  # JS opts the body into click-to-map
+    assert "http://" not in doc.replace('lang="en"', "")
+    assert "https://" not in doc
+    # no map column without a geo block
+    plain = catalog_to_html(build_catalog(branchy_rn, "CDE_STEM"))
+    assert 'id="map"' not in plain
+
+
 # ------------------------------------------------------------------ offline sample
 
 
