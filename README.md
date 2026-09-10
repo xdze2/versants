@@ -5,197 +5,168 @@ topographic and hydrographic data.
 
 ## Status
 
-Early scaffold. First deliverable: a CLI to **explore BD TOPAGE / BD TOPO
-topographic watersheds (`bassin versant topographique`) via the IGN Géoplateforme
-WFS**.
+Early scaffold. Two things work today:
 
-## Data sources
+- a **CLI** to pull BD TOPO watershed polygons and stream-network topology from
+  the IGN Géoplateforme WFS, and roll the fine river segments up into a
+  browsable "flows into" graph;
+- a **Streamlit navigator** for that graph (course + catchment map, drill into
+  sub-valleys).
 
-| Layer | Source | Access |
-|---|---|---|
-| Topographic watersheds | BD TOPO v3 `bassin_versant_topographique` (same concept as BD TOPAGE) | IGN Géoplateforme WFS 2.0 — `https://data.geopf.fr/wfs/ows` |
-| Full BD TOPAGE hydrography | IGN / OFB / Sandre | Sandre WFS (also OGC-compliant) |
-| Elevation (planned) | IGN RGE ALTI 1 m / 5 m | Géoplateforme WCS / department tiles |
-| Elevation, prototype (planned) | Copernicus GLO-30 | OpenTopography REST API |
+### 3D render prototype
 
-The WFS endpoint and layer name are configurable (`--wfs-endpoint`, `--layer`) so
-the same tooling points at Sandre or a different dataset.
+First isometric render of a catchment: the **Gave de Lutour** basin, delineated
+from a Copernicus GLO-30 DEM (`scratchpad/dem_lutour.py`) and rendered as a solid
+diorama block in three.js — 20 m contour lines, traced stream network draped on
+the surface, self-contained HTML with no server. Built by
+`scratchpad/render_lutour_3d.py`.
 
-### What the two hydrographic layers actually contain
+![Gave de Lutour — isometric render with 20 m contours](docs/images/lutour_3d_preview.png)
 
-Both come from IGN BD TOPO v3 and share the same `cours_d_eau` ("watercourse")
-identifiers, which is what lets us join them.
-
-**`troncon_hydrographique` — river segments.** The stream network as lines. A
-tronçon is *not* one reach between two confluences: the layer splits wherever any
-attribute changes (nature, width class, administrative limits) as well as at
-junctions, so segments are short — median **210 m**, and a single named river can
-be made of dozens of them (up to 84 in the Gavarnie sample). Confluences *are*
-always splits, though: 1039 of the 1042 junction nodes in the sample both end one
-tronçon and start another. Rolling these up into whole rivers is what
-`hydro/rivers.py` does.
-
-*How segments connect.* There is no explicit "next segment" field, and none is
-needed: each tronçon carries an upstream node id (`..._ini`) and a downstream one
-(`..._fin`), drawn from a shared `NOEUDHYD…` namespace. Two segments are joined
-when they name the same node — B follows A when `B.ini == A.fin`. That is the
-whole topology, and it is complete in the sample: all 3097 segments carry both
-ids, and 3045 of them have a downstream neighbour. The 52 that don't are outlets
-where the bbox clips the network, not missing data.
-
-Two things make this less mechanical than it sounds. The node ids say how
-segments *touch*, not which way water flows — that comes from
-`sens_de_l_ecoulement`, and for `Sens inverse` the two nodes must be swapped
-before the edge is added. And the graph is not one connected network: the
-Gavarnie sample yields 39 weakly connected components, the largest holding 78% of
-nodes. The rest are pieces the bbox cut off from their trunk plus 54 Spanish-side
-segments (`code_du_pays = ES`) that BD TOPO does not carry across the border. A
-river whose outlet falls outside the extent therefore surfaces as a *root* — dump
-a wider bbox to attach it. Flow itself is acyclic, so the result is a DAG.
-
-| Attribute | Why we use it |
-|---|---|
-| `cleabs` | Stable segment id; the key the map picks features by |
-| `lien_vers_noeud_hydrographique_ini` / `_fin` | Upstream/downstream node ids — **this is the connectivity** (see below) |
-| `sens_de_l_ecoulement` | Flow direction. `Sens inverse` means the drawn geometry points *upstream* and the two nodes must be swapped; `Double sens` (tidal/canal) is ambiguous |
-| `liens_vers_cours_d_eau` | The watercourse a segment belongs to — the roll-up key from segments to rivers |
-| `cpx_toponyme_de_cours_d_eau` | River name (only ~38% of segments carry one) |
-| `numero_d_ordre` | Strahler order, 1–7 here. Drives line width on the map |
-| `nature` | `Ecoulement naturel` vs `Canal`, `Conduit forcé`, `Retenue`, `Lac`… — lets us keep natural flow only |
-| `fictif` | Virtual link drawn through a lake or braided reach to keep the network connected |
-| `reseau_principal_coulant` | Marks the main flowing network, as opposed to side arms |
-
-**`bassin_versant_topographique` — sub-catchments.** Polygons that tile the
-drainage area, one per *reach* of a watercourse rather than per whole river: the
-`toponyme` reads like "Le Gave de Pau du confluent de l'Ouzom au confluent du
-Béez" — from one confluence to the next. So the atomic-area-between-junctions
-idea is right for the polygons, and each is keyed to the watercourse it drains
-via `liens_vers_cours_d_eau_principal`. They are coarse (median **49 km²**,
-derived from BD Carthage at 20 m planimetric precision) and cover far fewer
-watercourses than the tronçon layer does — in the Gavarnie sample only 10 of 367
-rivers get a polygon at all.
-
-The union of the sub-basins keyed to a river *and every river upstream of it* is
-that river's catchment area (`watershed.catchment_polygon`). That is a real
-drainage area, not a hull drawn around the stream lines.
-
-| Attribute | Why we use it |
-|---|---|
-| `liens_vers_cours_d_eau_principal` | The watercourse this sub-basin drains — the join key to the tronçon layer |
-| `cleabs` | Stable polygon id |
-| `toponyme` | Human-readable reach description ("from confluence X to confluence Y") |
-| `code_bdcarthage` / `code_hydrographique` | BD Carthage codes, for cross-referencing other datasets |
-
-One caveat worth knowing: a sub-basin is keyed to a *whole* watercourse, so
-dissolving them gives the catchment over that watercourse's full length —
-including reaches downstream of whatever bbox the tronçon dump was clipped to.
-That is correct for a river whose outlet sits inside the dump, and over-reaches
-for one the dump cuts off mid-course.
+![Gave de Lutour — near-plan view](docs/images/lutour_3d_top.png)
 
 ## Install
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"          # add ",dem,viz" once those stages land
+pip install -e ".[dev]"          # add ",app" for the browser navigator,
+                                 # ",dem" for the DEM catchment tools
 ```
 
-## Usage
+## CLI
 
 ```bash
-# What watershed-related layers does the endpoint advertise?
-valleespyr wfs layers --keyword bassin
-
-# Attribute schema of the watershed layer
-valleespyr wfs schema
-
-# How many watersheds intersect a bounding box (lon/lat)? — no download
-valleespyr wfs count --bbox -0.10,42.65,0.15,42.85
-
-# Fetch watersheds in a bbox as GeoJSON, reprojected to Lambert-93
-valleespyr wfs watersheds --bbox -0.10,42.65,0.15,42.85 --srs EPSG:2154 -o data/raw/gavarnie_ws.geojson
-
-# Fetch the watershed containing a pour point
-valleespyr wfs watersheds --point -0.0086,42.7350 -o data/raw/gavarnie_pourpoint_ws.geojson
-
-# Bulk-download a whole layer (paged). Output format from the suffix:
-#   .geojson              -> streamed GeoJSON, no extra deps
-#   .parquet / .gpkg      -> GeoParquet / GeoPackage (needs geopandas + pyarrow)
-valleespyr wfs dump -o data/raw/bassin_versant_topographique_fr.parquet          # all of France (~6.6k feats, ~1 min, 99 MB)
-valleespyr wfs dump --bbox -2.0,42.3,3.2,43.4 -o data/raw/bv_pyrenees.parquet     # Pyrénées only (~530 feats, 2 MB)
+valleespyr wfs   --help    # explore a WFS source (BD TOPAGE / BD TOPO watersheds)
+valleespyr hydro --help    # stream-network topology + the river graph
 ```
 
-### Explore it in the browser
+The WFS endpoint is a global option (`--wfs-endpoint`, IGN by default; Sandre
+also works), so the same tooling points at another OGC source.
+
+### Watersheds
+
+```bash
+# What watershed layers does the endpoint advertise? / its schema
+valleespyr wfs layers --keyword bassin
+valleespyr wfs schema
+
+# Count / fetch polygons for a bbox (lon,lat) or a pour point
+valleespyr wfs count      --bbox -0.10,42.65,0.15,42.85
+valleespyr wfs watersheds --bbox -0.10,42.65,0.15,42.85 --srs EPSG:2154 -o gavarnie_ws.geojson
+valleespyr wfs watersheds --point -0.0086,42.7350       -o pourpoint_ws.geojson
+
+# Bulk-download a whole layer (paged). Format from the suffix:
+#   .geojson           streamed, no extra deps
+#   .parquet / .gpkg   GeoParquet / GeoPackage (needs geopandas + pyarrow)
+valleespyr wfs dump                          -o data/raw/bassin_versant_fr.parquet   # all France, ~6.6k feats, ~1 min, 99 MB
+valleespyr wfs dump --bbox -2,42.3,3.2,43.4  -o data/raw/bv_pyrenees.parquet         # Pyrénées, ~530 feats, 2 MB
+```
+
+IGN's file store ships BD TOPO as per-département `.7z` archives of every theme
+(~1–2 GB each) behind an awkward Atom feed. The watershed layer is only ~6,600
+features for all of France, so paging the WFS is the simpler bulk source. Use the
+file store if you need the fine stream-topology layers.
+
+### River graph
+
+`hydro rivers` rolls the fine `troncon_hydrographique` segments up into whole
+**rivers** (keyed by BD TOPO's `cours_d_eau` id) and connects them into a "flows
+into" DAG. Per river you get: Strahler order, total length, the rivers in its
+catchment (recursive), its parent (the river downstream), and root / leaf state.
+
+```bash
+# Rivers in a loaded network, longest first
+valleespyr hydro rivers list --from-file data/raw/troncon_hydrographique_gavarnie_sample.geojson \
+    --named-only --min-length-km 3
+
+# Inspect one river; export its path or its whole catchment network
+valleespyr hydro rivers show "Gave d'Ossoue" --from-file … 
+valleespyr hydro rivers show "Gave de Héas"  --from-file … --geojson catchment -o heas_catchment.geojson
+
+# Trace the raw stream network upstream of a pour point
+valleespyr hydro tree --from-file … --point -0.0086,42.7350
+```
+
+`--bbox` fetches tronçons live instead of reading a file. A river whose outlet
+leaves the loaded extent shows up as a *root*; dump a wider area to attach it.
+
+### Browser navigator
 
 ```bash
 pip install -e ".[app]"
 streamlit run src/valleespyr/app.py      # or: valleespyr-app
 ```
 
-The Streamlit app is a **river-graph navigator**. Point it at a local
-`troncon_hydrographique` dump (see `wfs dump`); it rolls the segments up into
-whole rivers and lets you:
+Point it at a local `troncon_hydrographique` dump. It rolls segments up into
+rivers and lets you pick one, see its course (orange) and catchment network
+(blue) on a map with its stats, read tributaries biggest-first, and click into a
+sub-valley or walk back down via the breadcrumb. Downloads the current river's
+course or catchment as GeoJSON.
 
-- pick a river from the sidebar (name search / roots-only), or a root basin
-  from the landing table
-- see its **course** (orange) and its whole **catchment** stream network
-  (blue) on a pydeck map, with its length, Strahler order and root/leaf state
-- read its **tributaries** biggest-first and its **catchment tree** as text;
-  click a blue reach on the map or a row in the tributary list, then **enter**
-  it to drop into that sub-valley
-- walk back down via the breadcrumb (outlet ▸ … ▸ current) or the
-  "↓ downstream" button
-- download the current river's course or catchment as GeoJSON
+## Data model — what the layers actually contain
 
-### Why WFS and not the bulk file store
+Everything below is BD TOPO v3, sharing `cours_d_eau` ("watercourse") ids, which
+is what lets the layers join.
 
-IGN's *Service Téléchargement* (`data.geopf.fr/telechargement`) ships BD TOPO as
-per-département `.7z` archives of **every** theme (~1–2 GB each), indexed through a
-paginated Atom feed that is awkward to script (and rate-limits). The watershed
-layer alone is ~6,600 features for all of metropolitan France, so paging the WFS
-is the simpler bulk source — no archive, no unwanted themes. Use the file store
-later if you need the fine stream-topology layers (`troncon_hydrographique`,
-`cours_d_eau`).
+### `troncon_hydrographique` — river segments (lines)
 
-### Rivers: browse the network as a tree of watercourses
+A tronçon is **not** one reach between confluences: the layer splits wherever any
+attribute changes (nature, width class, admin limits) *and* at junctions, so
+segments are short — median **210 m**, up to 84 per named river. Confluences are
+always splits.
 
-`hydro rivers` rolls the fine `troncon_hydrographique` segments up into whole
-**rivers** (keyed by BD TOPO's `cours_d_eau` id) and connects them into a
-"flows into" DAG. From that you get, per river: its Strahler order, total
-length, the **rivers in its catchment** (recursive), its **parent** (the river
-downstream), and **root / leaf** state.
+**Connectivity** is by shared node id, not an explicit "next" field: each tronçon
+carries an upstream node (`..._ini`) and a downstream one (`..._fin`) from a
+shared `NOEUDHYD…` namespace. B follows A when `B.ini == A.fin`. That is the whole
+topology.
 
-```bash
-# List the rivers in a loaded network, longest first
-valleespyr hydro rivers list --from-file data/raw/troncon_hydrographique_gavarnie_sample.geojson \
-    --named-only --min-length-km 3
+Two wrinkles: node ids say how segments *touch*, not which way water flows — that
+is `sens_de_l_ecoulement`, and `Sens inverse` means swap the two nodes before
+adding the edge. And the graph is not one connected network — a bbox clips
+trunks, and BD TOPO does not carry Spanish-side segments (`code_du_pays = ES`)
+across the border, so a river whose outlet falls outside the extent surfaces as a
+root. Flow is acyclic; the result is a DAG. `hydro/rivers.py` does the roll-up.
 
-# Inspect one river: downstream river, tributaries, catchment, root/leaf
-valleespyr hydro rivers show "Gave d'Ossoue" --from-file data/raw/troncon_hydrographique_gavarnie_sample.geojson
+Fields used: `cleabs` (segment id), `lien_vers_noeud_hydrographique_ini/_fin`
+(connectivity), `sens_de_l_ecoulement`, `liens_vers_cours_d_eau` (roll-up key),
+`cpx_toponyme_de_cours_d_eau` (name, ~38% of segments), `numero_d_ordre`
+(Strahler, drives line width), `nature` (natural flow vs canal / conduit / lake),
+`fictif` (virtual link through a lake or braid), `reseau_principal_coulant`.
 
-# Its own path, or its whole catchment stream network, as GeoJSON
-valleespyr hydro rivers show "Gave de Héas" --from-file … --geojson path      -o heas.geojson
-valleespyr hydro rivers show "Gave de Héas" --from-file … --geojson catchment -o heas_catchment.geojson
-```
+### `bassin_versant_topographique` — sub-catchments (polygons)
 
-`--bbox` fetches tronçons live instead of reading a file. A river whose outlet
-leaves the loaded extent shows up as a *root*; dump a wider area (see
-`wfs dump`) to attach it to the network below.
+Polygons that tile the drainage area, one per **reach** of a watercourse rather
+than per whole river — `toponyme` reads "Le Gave de Pau du confluent de l'Ouzom
+au confluent du Béez". Each is keyed to its watercourse via
+`liens_vers_cours_d_eau_principal`. Coarse (median **49 km²**, from BD Carthage at
+20 m precision) and sparse — in the Gavarnie sample only 10 of 367 rivers get a
+polygon.
+
+The union of the sub-basins for a river *and every river upstream of it* is that
+river's real catchment area (`watershed.catchment_polygon`) — a drainage area,
+not a hull around the lines. Caveat: keyed to a *whole* watercourse, so the
+dissolve over-reaches for a river the tronçon dump cuts off mid-course.
+
+Fields used: `liens_vers_cours_d_eau_principal` (join key), `cleabs`, `toponyme`,
+`code_bdcarthage` / `code_hydrographique`.
 
 ## Layout
 
 ```
 config/            per-valley config (bbox, pour point, CRS, source URLs)
 src/valleespyr/
-  cli.py           click CLI  (groups: `wfs`, `hydro`)
-  watershed.py     fetch / select topographic watersheds
-  dump.py          bulk-download a whole layer (paged) to GeoJSON/GeoParquet/GPKG
-  app.py           Streamlit river-graph navigator (course + catchment map, drilldown)
+  cli.py           click CLI  (groups: wfs, hydro)
+  watershed.py     fetch / select watershed polygons; catchment_polygon() dissolve
+  dump.py          bulk-download a layer (paged) to GeoJSON / GeoParquet / GPKG
+  app.py           Streamlit river-graph navigator
   sources/wfs.py   minimal OGC WFS 2.0 client
   hydro/
-    network.py     load troncon_hydrographique -> downstream-pointing DiGraph
-    trace.py       snap a pour point, trace upstream, shape it as a tree
-    rivers.py      roll segments up into a river graph (list / catchment / parent)
-data/raw|processed getignored working data
+    network.py     troncon_hydrographique -> downstream-pointing DiGraph
+    trace.py       snap a pour point, trace upstream, shape as a tree
+    rivers.py      roll segments up into a river graph
+scratchpad/        DEM catchment demo + 3D render builder (dem_lutour.py,
+                   render_lutour_3d.py)
+data/raw|processed gitignored working data
 tests/             offline unit tests
 ```
 
