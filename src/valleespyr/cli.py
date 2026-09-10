@@ -915,6 +915,95 @@ def valley_plate(
     click.echo(str(Path(output).resolve()))
 
 
+@cli.command("catalog")
+@click.argument("root_query")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option(
+    "--bassins",
+    "bassins_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=None,
+    help="Local bassin_versant_topographique dump — adds a shape icon + area per "
+    "valley where a sub-basin covers it.",
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=None,
+    help="Fold the tree beyond this many confluences from the root into "
+    "'+N rivers' leaves (default: no limit). Applies to both the JSON and the "
+    "HTML graph.",
+)
+@click.option(
+    "--no-orient-outlet-down",
+    is_flag=True,
+    help="Keep icon outlines north-up instead of rotating each so its outlet points down.",
+)
+@click.option(
+    "-o", "--output", default=None, help="Write the catalog JSON here (default: stdout)."
+)
+@click.option(
+    "--html",
+    "html_output",
+    default=None,
+    help="Also write a self-contained HTML river-git-graph here.",
+)
+@click.pass_context
+def catalog_cmd(
+    ctx: click.Context,
+    root_query: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    bassins_path: str | None,
+    max_depth: int | None,
+    no_orient_outlet_down: bool,
+    output: str | None,
+    html_output: str | None,
+) -> None:
+    """Walk the river graph from ROOT_QUERY into a git-shaped valley-tree JSON.
+
+    ROOT_QUERY is a river name (case-insensitive substring) or a ``COURDEAU…``
+    id. Each node splits its upstream into a ``mainline`` (the same valley
+    continuing) and ``tributaries`` (branches merging in), carries length,
+    Strahler order, valleys upstream and a study-local Pfafstetter code, and —
+    with ``--bassins`` — a drainage ``area_km2``. ``--html`` renders it as a
+    static git-graph: one lane per river, tinted by Strahler order.
+    """
+    from .catalog import build_catalog
+    from .render.catalog_html import render_catalog_html
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+
+    bassins = None
+    if bassins_path:
+        from .watershed import load_bassins
+
+        bassins = load_bassins(bassins_path)
+
+    try:
+        catalog = build_catalog(
+            rn,
+            root_query,
+            bassins=bassins,
+            max_depth=max_depth,
+            orient_outlet_down=not no_orient_outlet_down,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    m = catalog["meta"]
+    click.echo(
+        f"{m['n_nodes']} rivers under {m['root_name'] or m['root_id']}"
+        + (f"; areas from {bassins_path}" if m["has_icons"] else ""),
+        err=True,
+    )
+    _dump(catalog, output)
+    if html_output:
+        render_catalog_html(catalog, html_output)
+        click.echo(f"wrote {html_output}", err=True)
+
+
 @valley.command("diorama")
 @click.argument("slug")
 @click.option(

@@ -40,6 +40,56 @@ minor lines so the human layer reads on top).
 
 ![Neste de Rioumajou — first 2D topo plate](scratchpad/rioumajou.png)
 
+### Valley catalog — browse the basin like a git history
+
+`valleespyr catalog` walks the river graph from a chosen root into a nested JSON
+tree and (optionally) one self-contained HTML page. The mental model is a **git
+commit graph**, not a directory:
+
+| git | valley graph |
+|---|---|
+| commit | a river (opaque stable id = its `cours_d_eau`) |
+| parent commit | the river it flows into |
+| merge commit | a confluence |
+| `main` | the trunk to the sea |
+| `git log --first-parent` | the trunk walked from a headwater back to the root |
+
+Each node splits its upstream neighbours into a **`mainline`** (the one child
+that continues the same valley upstream — the dominant water path, `HEAD~1` on
+the same branch) and **`tributaries`** (every other child, each the tip of a
+branch that merges in at this confluence, biggest sub-catchment first). Walking
+`mainline` repeatedly follows the trunk to its source. A river with more than one
+downstream (a real bifurcation) appears once, under its first downstream, with
+the alternates in `also_flows_into`.
+
+Every node carries length, Strahler order, valleys upstream and a study-local
+Pfafstetter code; passing a `bassin_versant_topographique` dump also fills in a
+drainage `area_km2` where a sub-basin covers the valley.
+
+```bash
+valleespyr catalog COURDEAU0000002000894629 \
+    --from-file data/raw/troncon_hydrographique_pyrenees.parquet \
+    --bassins data/raw/bassin_versant_topographique_pyrenees.parquet \
+    --max-depth 8 \
+    -o data/processed/garonne_catalog.json \
+    --html data/processed/garonne_catalog.html
+```
+
+The root is a river name (case-insensitive substring) or a `COURDEAU…` id;
+`--max-depth` counts confluences, not free mainline hops. The HTML is a static
+**river git-graph**: one lane per river, tinted and thickened by Strahler order
+(dark trunk, pale headwaters); a lane runs unbroken past every tributary that
+hangs off it and curves left into its parent where the two meet. One row per
+river — the reach-splits BD TOPO makes inside a watercourse are not drawn —
+with the name and facts to the right, `▲` marking a source and `+N` a folded
+branch. One file — inline CSS + a few lines of JS for a name filter — no server,
+no CDN.
+
+The Pfafstetter code is **study-local**: it is a path from the chosen root over
+the loaded (bbox-clipped) network, so it sorts and gives an "is-upstream-of"
+test *within one catalog* but is not comparable across catalogs or to published
+datasets. Fix the root (always build from `la Garonne`) for stable codes.
+
 ## Install
 
 ```bash
@@ -198,10 +248,14 @@ src/valleespyr/
   dump.py          bulk-download a layer (paged) to GeoJSON / GeoParquet / GPKG
   app.py           Streamlit river-graph navigator
   sources/wfs.py   minimal OGC WFS 2.0 client
+  catalog.py       river graph -> git-shaped valley-tree JSON (mainline /
+                   tributaries, Pfafstetter, area)
   hydro/
     network.py     troncon_hydrographique -> downstream-pointing DiGraph
     trace.py       snap a pour point, trace upstream, shape as a tree
     rivers.py      roll segments up into a river graph
+  render/
+    catalog_html.py  valley-tree JSON -> a self-contained static river git-graph
 scratchpad/        DEM catchment demo + 3D render builder (dem_lutour.py,
                    render_lutour_3d.py)
 data/raw|processed gitignored working data
