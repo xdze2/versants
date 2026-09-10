@@ -103,11 +103,20 @@ h1 {{ margin: 0 0 2px; font-size: 17px; font-weight: 600; }}
 }}
 .orderctl {{ display: flex; gap: 7px; align-items: center; color: var(--dim); font-size: 12px; }}
 .orderctl input[type=range] {{ width: 120px; }}
+.orderctl input[type=range]:disabled {{ opacity: .4; }}
 .orderctl b {{ color: var(--ink); font-variant-numeric: tabular-nums; }}
 .orderctl .n {{ color: var(--faint); }}
+.focusctl {{ display: flex; gap: 5px; align-items: center; color: var(--dim);
+  font-size: 12px; cursor: pointer; }}
 .legend {{ display: flex; gap: 10px; align-items: center; color: var(--faint); font-size: 11px; }}
 .legend i {{ width: 20px; height: 0; border-top-style: solid; display: inline-block;
   vertical-align: middle; margin-right: 3px; }}
+.crumbs {{ margin-top: 8px; font-size: 12px; color: var(--faint); min-height: 18px; }}
+.crumbs:empty {{ display: none; }}
+.crumbs a {{ color: var(--dim); text-decoration: none; }}
+.crumbs a:hover {{ color: var(--accent); text-decoration: underline; }}
+.crumbs b {{ color: var(--ink); font-weight: 600; }}
+.crumbs .sep {{ margin: 0 5px; color: var(--line); }}
 
 main {{ padding: 8px 22px 60px; }}
 .graphwrap {{
@@ -160,6 +169,8 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .name.unnamed {{ color: var(--faint); font-weight: 400;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }}
 .row.leaf .name {{ font-weight: 400; color: var(--faint); font-style: italic; }}
+.row.leaf[data-fold-into] {{ cursor: pointer; }}
+.row.leaf[data-fold-into]:hover .name {{ color: var(--accent); }}
 .more {{ color: var(--faint); font-size: 11px; }}
 .facts {{ color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }}
 .facts .k {{ color: var(--faint); }}
@@ -188,6 +199,48 @@ _JS = r"""
   const slider = document.getElementById('order');
   const orderOut = document.getElementById('order-val');
   const filterEl = document.getElementById('filter');
+  const focusBox = document.getElementById('focus');
+  const crumbEl = document.getElementById('crumbs');
+
+  // index every node by id, once
+  const nodeById = {};
+  (function idx(n) {
+    nodeById[n.id] = n;
+    if (n.mainline) idx(n.mainline);
+    for (const t of n.tributaries || []) idx(t);
+  })(root);
+
+  // --- selection-relative folding state --------------------------------
+  // When focus mode is on the graph folds around the selected river: the
+  // spine from the root down to it always stays open; *inside* the selection's
+  // own basin the order slider still applies, so focusing the trunk shows its
+  // major tributaries (raise the slider to prune) while focusing a small
+  // tributary shows all of it (nothing there is below threshold). Everything
+  // outside the basin and off the spine folds to a +N leaf.
+  let selectedId = null;
+  let spine = new Set();       // ids on the root -> selection path (inclusive)
+  let selBasin = new Set();    // every id inside the selection's catchment
+  const spinePath = [];        // [rootNode, …, selNode] for the breadcrumb
+
+  function recomputeSelection(id) {
+    selectedId = id || null;
+    spine = new Set();
+    selBasin = new Set();
+    spinePath.length = 0;
+    if (!id || !nodeById[id]) return;
+    (function find(n, trail) {
+      const here = trail.concat(n);
+      if (n.id === id) { here.forEach(x => spine.add(x.id)); spinePath.push(...here); return true; }
+      for (const k of [n.mainline, ...(n.tributaries || [])].filter(Boolean))
+        if (find(k, here)) return true;
+      return false;
+    })(root, []);
+    (function sub(n) {
+      selBasin.add(n.id);
+      if (n.mainline) sub(n.mainline);
+      for (const t of n.tributaries || []) sub(t);
+    })(nodeById[id]);
+  }
 
   // --- style helpers ------------------------------------------------------
   function orderStyle(order) {
@@ -234,19 +287,34 @@ _JS = r"""
     };
     const release = (l) => free.push(l);
 
+    const focus = focusMode && selectedId != null;
+
     function visibleTribs(node) {
-      // [{node} | {fold: n, count}], biggest first (input already sorted)
+      // visible tributaries (biggest first — input already sorted) plus the
+      // count and the biggest hidden child, so a "+N" leaf can pivot into it
       const out = [];
-      let folded = 0;
+      let folded = 0, biggestHidden = null;
       for (const t of node.tributaries || []) {
         const force = forced.get(t.id);
-        const show = force === true ||
-          (force !== false && subtreeMaxOrder(t) >= minOrder);
+        let show;
+        if (force === true) show = true;
+        else if (force === false) show = false;
+        else if (focus) {
+          // spine is always open; inside the selection's basin the order
+          // slider still prunes; everything else folds away
+          show = spine.has(t.id) ||
+            (selBasin.has(t.id) && subtreeMaxOrder(t) >= minOrder);
+        } else {
+          show = subtreeMaxOrder(t) >= minOrder;
+        }
         if (show) out.push({ node: t });
-        else folded += subtreeCount(t);
+        else {
+          folded += subtreeCount(t);
+          if (!biggestHidden) biggestHidden = t.id;  // list is sorted big->small
+        }
       }
       folded += node.tributaries_truncated || 0;
-      return { tribs: out, folded };
+      return { tribs: out, folded, biggestHidden };
     }
 
     function walk(node, lane, parentLane, depth) {
@@ -259,7 +327,7 @@ _JS = r"""
                       leaf: true, count: subtreeCount(cur), hasHidden: false });
           break;
         }
-        const { tribs, folded } = visibleTribs(cur);
+        const { tribs, folded, biggestHidden } = visibleTribs(cur);
         rows.push({ node: cur, lane, parentLane: curParentLane, depth: curDepth,
                     leaf: false, count: 0,
                     hasHidden: folded > 0, foldedCount: folded });
@@ -273,7 +341,8 @@ _JS = r"""
           const tl = alloc();
           rows.push({ node: { name: null, id: '+' + folded }, lane: tl,
                       parentLane: lane, depth: curDepth + 1, leaf: true,
-                      count: folded, hasHidden: false });
+                      count: folded, hasHidden: false,
+                      foldInto: biggestHidden });
           segs.push({ lane: tl, top: rows.length - 1, bot: rows.length - 1,
                       owner: rows.length - 1 });
           release(tl);
@@ -290,9 +359,14 @@ _JS = r"""
   }
 
   // --- draw the graph SVG from a layout --------------------------------
+  const FOLD_MARK = 14;  // px the "o-o-" collapsed marker overhangs its lane
   function drawGraph(lo) {
     const n = lo.rows.length;
-    const laneW = G.LANE_PAD + (lo.maxLane + 1) * G.LANE_W;
+    // widen the box if any collapsed leaf's marker would run past the last lane
+    const hasFold = lo.rows.some(
+      r => r.leaf && String(r.node.id || '').startsWith('+'));
+    const laneW = G.LANE_PAD + (lo.maxLane + 1) * G.LANE_W +
+      (hasFold ? FOLD_MARK : 0);
     const h = n * G.ROW_H;
 
     // vertical lane segments, higher lanes first so the trunk overpaints
@@ -325,7 +399,25 @@ _JS = r"""
                   ' ' + cx.toFixed(1) + ',' + cy.toFixed(1) + '" ' +
                   'stroke="' + c + '" stroke-width="' + ew.toFixed(1) + '"/>';
       }
-      if (r.leaf) {
+      const collapsed = r.leaf && String(r.node.id || '').startsWith('+');
+      if (collapsed) {
+        // a "+N folded sub-basin" marker: two hollow dots joined by a stub,
+        // trailing off toward the label — reads as a compressed "o-o-" chain
+        const r1 = 2.6, gap = 6, r2 = 1.9, tail = 4;
+        const x1 = cx, x2 = cx + gap;
+        dots += '<circle cx="' + x1.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                '" r="' + r1 + '" fill="' + G.BG + '" stroke="' + c +
+                '" stroke-width="1.4"/>';
+        dots += '<line x1="' + (x1 + r1).toFixed(1) + '" y1="' + cy.toFixed(1) +
+                '" x2="' + (x2 - r2).toFixed(1) + '" y2="' + cy.toFixed(1) +
+                '" stroke="' + c + '" stroke-width="1.4"/>';
+        dots += '<circle cx="' + x2.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                '" r="' + r2 + '" fill="' + G.BG + '" stroke="' + c +
+                '" stroke-width="1.3"/>';
+        dots += '<line x1="' + (x2 + r2).toFixed(1) + '" y1="' + cy.toFixed(1) +
+                '" x2="' + (x2 + r2 + tail).toFixed(1) + '" y2="' + cy.toFixed(1) +
+                '" stroke="' + c + '" stroke-width="1.3" stroke-dasharray="1.5 1.6"/>';
+      } else if (r.leaf) {
         dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
                 '" r="2.3" fill="' + G.BG + '" stroke="' + c + '" stroke-width="1.5"/>';
       } else {
@@ -371,9 +463,11 @@ _JS = r"""
     for (const r of lo.rows) {
       const n = r.node;
       if (r.leaf && !n.name && String(n.id || '').startsWith('+')) {
-        out += '<li class="row leaf" style="height:' + G.ROW_H + 'px">' +
+        const into = r.foldInto ? ' data-fold-into="' + esc(r.foldInto) + '"' : '';
+        const hint = (focusMode && r.foldInto) ? ' — click to open' : '';
+        out += '<li class="row leaf"' + into + ' style="height:' + G.ROW_H + 'px">' +
                '<span class="caret" hidden></span>' +
-               '<span class="name unnamed">+' + r.count + ' rivers upstream</span></li>';
+               '<span class="name unnamed">+' + r.count + ' rivers' + hint + '</span></li>';
         continue;
       }
       const named = !!n.name;
@@ -403,22 +497,57 @@ _JS = r"""
   }
 
   // --- render = layout + both columns --------------------------------
+  let focusMode = !!(focusBox && focusBox.checked);
   let curLayout = null;
+
+  function drawCrumbs() {
+    if (!crumbEl) return;
+    if (!focusMode || !spinePath.length) { crumbEl.innerHTML = ''; return; }
+    crumbEl.innerHTML = spinePath.map((n, i) => {
+      const label = esc(n.name || n.id);
+      const last = i === spinePath.length - 1;
+      return last
+        ? '<b>' + label + '</b>'
+        : '<a href="#" data-id="' + esc(n.id) + '">' + label + '</a>';
+    }).join('<span class="sep">›</span>');
+  }
+
   function render() {
     const minOrder = +slider.value;
     orderOut.textContent = minOrder;
     curLayout = layout(minOrder);
     drawGraph(curLayout);
     drawLabels(curLayout);
+    drawCrumbs();
     const drawn = curLayout.rows.filter(r => !r.leaf).length;
     const total = meta.n_nodes || drawn;
-    metaExtra.textContent = drawn < total
+    let note = drawn < total
       ? ' · ' + drawn + ' of ' + total + ' rivers shown'
       : ' · ' + drawn + ' rivers';
+    if (focusMode && selectedId != null) note += ' · folded to selection';
+    metaExtra.textContent = note;
     if (window._catalogGeoSync) window._catalogGeoSync();
   }
 
+  // a selection changed (from the map, a row, a +N leaf, or a crumb)
+  function focusOn(id) {
+    recomputeSelection(id);
+    if (window._catalogMapSelect) window._catalogMapSelect(id);
+    render();
+  }
+  window._catalogFocusOn = focusOn;
+
   slider.addEventListener('input', render);
+  if (focusBox) focusBox.addEventListener('change', () => {
+    focusMode = focusBox.checked;
+    render();
+  });
+  if (crumbEl) crumbEl.addEventListener('click', ev => {
+    const a = ev.target.closest('a[data-id]');
+    if (!a) return;
+    ev.preventDefault();
+    focusOn(a.dataset.id);
+  });
   labelsEl.addEventListener('click', ev => {
     const btn = ev.target.closest('.caret[data-id]');
     if (!btn) return;
@@ -536,7 +665,9 @@ _JS = r"""
       return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
     }
 
-    function select(id) {
+    // paint the map for a selection; the graph refold is driven separately
+    // by the outer focusOn(), which calls this.
+    function paintMap(id) {
       const g = geo.rivers[id];
       if (!g) return;
       currentId = id;
@@ -573,15 +704,19 @@ _JS = r"""
       if (li) { li.classList.add('selected'); current = li; }
     }
     window._catalogGeoSync = syncSelectedRow;
+    window._catalogMapSelect = paintMap;
 
-    labelsEl.addEventListener('click', ev => {
-      const li = ev.target.closest('.row[data-id]');
-      if (li && !ev.target.closest('.caret') && geo.rivers[li.dataset.id])
-        select(li.dataset.id);
-    });
-
-    if (geo.rivers[meta.root_id]) select(meta.root_id);
+    if (geo.rivers[meta.root_id]) focusOn(meta.root_id);
   })();
+
+  // rows drive the selection (focus refold + map). Works with or without geo.
+  labelsEl.addEventListener('click', ev => {
+    if (ev.target.closest('.caret')) return;
+    const leaf = ev.target.closest('.row.leaf[data-fold-into]');
+    if (leaf) { focusOn(leaf.dataset.foldInto); return; }
+    const li = ev.target.closest('.row[data-id]');
+    if (li && li.dataset.id && nodeById[li.dataset.id]) focusOn(li.dataset.id);
+  });
 
   render();
 })();
@@ -602,8 +737,16 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
 
     has_geo = bool(catalog.get("geo") and catalog["geo"].get("rivers"))
     max_ord = max(_max_order(root), 1)
-    # open at an order that keeps the initial graph legible for a big basin
-    start_order = 1 if max_ord <= 4 else (2 if max_ord <= 6 else 3)
+    n_nodes = meta.get("n_nodes") or 1
+    # open the slider at an order that keeps the first paint legible: a small
+    # basin shows whole, a large one starts well pruned (the graph lands
+    # focused on the root, so the slider is the only thing bounding it).
+    if n_nodes <= 120:
+        start_order = 1
+    elif n_nodes <= 400:
+        start_order = min(3, max_ord)
+    else:
+        start_order = min(max_ord - 1, max(4, max_ord - 3))
 
     if has_geo:
         map_w_css = f"clamp({MAP_MIN}px, {MAP_MAX_VW}vw, 50vw)"
@@ -627,7 +770,11 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         f"git-graph — each lane is one river, tinted by Strahler order; a lane "
         f"turns into its parent where the two meet"
         f'<span id="meta-extra"></span>'
-        + (" · click a row to map its network" if has_geo else "")
+        + (
+            " · click a row to select it — the graph folds around it"
+            if has_geo
+            else " · click a row to fold the graph around it"
+        )
     )
 
     legend = "".join(
@@ -639,7 +786,7 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
     css = _CSS_TMPL.format(
         grid_cols=grid_cols,
         map_ar=f"{MAP_VB_W} / {MAP_VB_H}",
-        map_top=104,
+        map_top=128,
     )
 
     geom = {
@@ -672,8 +819,11 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
     <label class="orderctl">min order <input id="order" type="range" min="1"
       max="{max_ord}" value="{start_order}" step="1"><b id="order-val">{start_order}</b>
       <span class="n">/ {max_ord}</span></label>
+    <label class="focusctl"><input id="focus" type="checkbox" checked> fold around
+      selection</label>
     <span class="legend">{legend}</span>
   </div>
+  <div id="crumbs" class="crumbs"></div>
 </header>
 <main>
   <div class="graphwrap">

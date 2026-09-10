@@ -349,6 +349,17 @@ def test_catalog_to_html_passes_max_depth_to_the_client(branchy_rn):
     assert '"MAX_DEPTH": 0' in catalog_to_html(cat, max_depth=0)
 
 
+def test_catalog_to_html_has_selection_focus_controls(branchy_rn):
+    cat = build_catalog(branchy_rn, "CDE_STEM")
+    doc = catalog_to_html(cat)
+    # the "fold around selection" toggle + a breadcrumb strip
+    assert 'id="focus" type="checkbox"' in doc
+    assert 'id="crumbs"' in doc
+    # the client recomputes a root->selection spine and folds tributaries to it
+    assert "function recomputeSelection(" in doc
+    assert "spine.has(" in doc and "selBasin.has(" in doc
+
+
 def test_catalog_to_html_escapes_names(simple_rn):
     cat = build_catalog(simple_rn, "Main")
     cat["meta"]["root_name"] = "A & B <em>x</em>"
