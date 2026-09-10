@@ -27,7 +27,10 @@ slider move or caret click. Beyond ``--max-depth`` a branch is folded to a
 
 When the catalog carries a ``geo`` block (``valleespyr catalog --geo``) a third
 column holds a sticky mini-map: clicking a row draws just that river and its
-upstream network there, lon/lat projected in the browser, fit to frame.
+upstream network there, lon/lat projected in the browser, fit to frame. On the
+map each line's stroke width scales with the river's Strahler order (same read
+as the git-graph lanes), with the selected river and its network drawn heavier
+than the faint catchment context.
 
 ``render_catalog_html(catalog, path)`` writes the file; ``catalog_to_html`` gives
 the string.
@@ -150,12 +153,14 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 #map {{ display: block; width: 100%; height: auto;
   aspect-ratio: {map_ar}; background: #fbfcfd; }}
 #map path, #map circle {{ vector-effect: non-scaling-stroke; }}
-#map .ctx {{ fill: none; stroke: #d3dae1; stroke-width: 1;
+/* stroke-width is set per-path from the river's Strahler order (see _JS,
+   mapWidth); the values here are only the fallback for a river with no order. */
+#map .ctx {{ fill: none; stroke: #d3dae1; stroke-width: 0.8;
   stroke-linecap: round; stroke-linejoin: round; }}
-#map .up {{ fill: none; stroke: #94a3b1; stroke-width: 1.3;
+#map .up {{ fill: none; stroke: #94a3b1; stroke-width: 1.1;
   stroke-linecap: round; stroke-linejoin: round; }}
 #map .sel {{ fill: none; stroke: var(--accent); stroke-linecap: round;
-  stroke-linejoin: round; stroke-width: 2.8; }}
+  stroke-linejoin: round; stroke-width: 2.4; }}
 #map .outlet {{ fill: var(--accent); stroke: #fff; stroke-width: 1; }}
 .mapcap {{
   padding: 8px 10px; border-top: 1px solid var(--line); font-size: 11.5px;
@@ -584,6 +589,17 @@ _JS = r"""
     document.body.classList.add('has-geo');
 
     const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height, PAD = 14;
+
+    // line weight on the map scales with Strahler order, same idea as the
+    // git-graph lanes but a wider spread so a trunk reads clearly against its
+    // headwaters. Non-scaling-stroke keeps these constant in screen px as the
+    // map zooms. `boost` fattens the picked-out selection over the faint ctx.
+    function mapWidth(order, boost) {
+      const o = Math.min(Math.max(order || 1, 1), 7);
+      const w = (0.6 + (o - 1) * 0.52) * (boost || 1);
+      return boost && boost > 1 ? Math.max(w, 1.6) : w;  // keep picked-out lines visible
+    }
+
     const node = {}, up = {};
     (function w(n) {
       node[n.id] = n;
@@ -625,7 +641,9 @@ _JS = r"""
 
     let ctx = '';
     for (const id in geo.rivers)
-      ctx += '<path class="ctx" d="' + pathD(geo.rivers[id].line) + '"/>';
+      ctx += '<path class="ctx" style="stroke-width:' +
+        mapWidth((node[id] || {}).strahler).toFixed(2) + '" d="' +
+        pathD(geo.rivers[id].line) + '"/>';
     svg.innerHTML = '<g class="ctxg">' + ctx + '</g><g class="hi"></g>';
     const hi = svg.querySelector('.hi');
 
@@ -674,9 +692,13 @@ _JS = r"""
       let parts = '';
       for (const uid of up[id] || []) {
         const ug = geo.rivers[uid];
-        if (ug) parts += '<path class="up" d="' + pathD(ug.line) + '"/>';
+        if (ug) parts += '<path class="up" style="stroke-width:' +
+          mapWidth((node[uid] || {}).strahler, 1.25).toFixed(2) + '" d="' +
+          pathD(ug.line) + '"/>';
       }
-      parts += '<path class="sel" d="' + pathD(g.line) + '"/>';
+      parts += '<path class="sel" style="stroke-width:' +
+        mapWidth((node[id] || {}).strahler, 1.7).toFixed(2) + '" d="' +
+        pathD(g.line) + '"/>';
       const ox = px(g.outlet[0]), oy = py(g.outlet[1]);
       parts += '<circle class="outlet" cx="' + ox.toFixed(1) + '" cy="' +
                oy.toFixed(1) + '" r="3.2"/>';

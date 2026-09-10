@@ -438,6 +438,17 @@ def test_geo_html_gets_a_map(branchy_rn):
     assert 'id="map"' not in plain
 
 
+def test_map_line_width_scales_with_strahler_order(branchy_rn):
+    """The mini-map ships a mapWidth(order) helper and feeds each drawn line its
+    river's Strahler order, so a trunk renders heavier than a headwater."""
+    doc = catalog_to_html(build_catalog(branchy_rn, "CDE_STEM", geo=True))
+    assert "function mapWidth(order" in doc
+    # context, upstream and selected lines all get a per-order stroke-width
+    assert "mapWidth((node[id] || {}).strahler)" in doc
+    assert "mapWidth((node[uid] || {}).strahler, 1.25)" in doc
+    assert "mapWidth((node[id] || {}).strahler, 1.7)" in doc
+
+
 # ------------------------------------------------------------------ offline sample
 
 
