@@ -83,7 +83,9 @@ source is the public, unauthenticated AWS S3 bucket `copernicus-dem-30m`
 fallback exists for `demtype` values S3 doesn't carry, but needs a free API
 key and caps at 50 downloads/24 h.
 
-**Algorithm** (`hydro/dem.py`, orchestrated by `valley.py::delineate_river`):
+**Algorithm** (`hydro/dem.py`, orchestrated by `valley.py::delineate_river` /
+`delineate_river_search` — see "Confluence pixel ambiguity" below for why
+there are two):
 
 1. **bbox**: `catchment_bbox` takes the bounds of the river's own catchment
    stream network (from the BD TOPO graph, §1) and pads every side by 15% of
@@ -99,7 +101,7 @@ key and caps at 50 downloads/24 h.
 4. **snap the pour point**: the river's outlet coordinate (from §1's
    `outlet_point`) rarely lands exactly on the DEM's own channel cells, so it
    is snapped onto the nearest cell where flow accumulation exceeds
-   `ACC_CHANNEL_CELLS` (default 1000 cells, ≈0.9 km² of contributing area —
+   `acc_channel_cells` (default 1000 cells, ≈0.9 km² of contributing area —
    a sane channel head for a Pyrenean torrent). A snap moving the point more
    than `SNAP_RADIUS_CELLS` (8 cells) logs a warning.
 5. **delineate + vectorise**: `grid.catchment()` (pysheds) traces every cell
@@ -108,40 +110,80 @@ key and caps at 50 downloads/24 h.
    its area measured in EPSG:2154 (Lambert-93, equal-area enough for this).
 6. **sanity check**: `course_inside_frac` measures what fraction of the
    river's *own* mapped course (from BD TOPO) falls inside the delineated
-   polygon. Below 90% is logged as a warning — the catchment likely locked
-   onto the wrong drainage — but is **not** currently rejected automatically
-   (see difficulties below).
+   polygon.
+
+**Confluence pixel ambiguity, and the pour-point search that works around it.**
+When a tributary's true mouth sits only one or two DEM cells from a much
+larger trunk stream, a single accumulation-threshold snap (step 4 above) has
+no way to prefer the tributary's own (small) inflow cell over the
+neighbouring trunk cell — it just grabs whichever qualifying cell is nearest,
+and `grid.catchment()` then faithfully delineates the *wrong* basin: a
+plausible-looking polygon with a low `course_inside_frac` that nonetheless
+used to pass straight through the batch's only hard gate (measured area) and
+get cached wrong.
+
+Confirmed case, investigated down to the pixel: *Ruisseau d'Aube*'s outlet
+sits right where *la Neste du Louron* takes a tight hairpin bend in a steep
+gorge — for about 1 km above the confluence, COP30 (~30 m posting) cannot
+resolve Aube's own channel as a distinct flow path from Louron's; the two are
+braided together in the accumulation raster (visually confirmed with a
+hillshade overlay — every point on Aube's own mapped course in that 1 km
+oscillates between ~10 cells and Louron's ~17,000+ within a pixel or two of
+each other). A single snap at the true outlet always locks onto Louron and
+returns Louron's own basin (12.7 km², 3% of Aube's course inside it) —
+**no threshold or single-point heuristic fixes this**, because the ambiguity
+is in the terrain data itself, not in the snap logic.
+
+What does work: don't trust one snap. `upstream_offset_point` walks back
+along the river's *own* tronçon chain by a given distance and
+`delineate_river_search` (both `valley.py`) tries a handful of such offsets
+(0, 100, …, 1100 m — 0 first, since most rivers need no offset at all) each
+against a couple of `acc_channel_cells` thresholds, all against **one shared
+conditioned grid** (`condition()` runs once per river, not once per
+candidate). Every candidate is scored by `course_inside_frac`; the
+highest-scoring one is kept if it clears 0.9, and the river is reported
+**undetermined** — no polygon written — if nothing does. For Aube this finds
+a 300 m offset that lands past the hairpin, on Aube's own resolvable channel:
+**11.5 km², 96% of its course inside**. Confirmed on a second, non-ambiguous
+river (Gave de Lutour, WFS reference 39.34 km²) that the search costs nothing
+extra there — the 0 m/unoffset candidate already scores 0.997 and the search
+exits after just one trace.
+
+`delineate_river` (the single-snap function) still exists and is used by the
+one-off, human-supervised commands (`valley render`, `valley show
+--geojson catchment`) where a person can see a bad result and re-run with a
+different `--acc-channel-cells` by hand. `delineate_river_search` is what the
+unattended batch precompute (below) uses, since nobody is watching it decide
+whether a polygon is right.
 
 **Batch driver** (`valleespyr valley catchments precompute`, `cli.py`):
 walks a river's whole upstream tree (§1), skips anything already covered by
-the WFS polygon or already cached, delineates the rest from DEM, and keeps a
-result only if its *measured* area falls in `[5, 150] km²` — the range that
-"reads as one valley" on the catalog map. Results are written to
-`data/processed/catchments.json` after every kept river (not just at the
+the WFS polygon or already cached, delineates the rest from DEM via
+`delineate_river_search`, and keeps a result only if its *measured* area
+falls in `[5, 150] km²` — the range that "reads as one valley" on the catalog
+map. A river the search couldn't resolve confidently is counted separately
+as "undetermined" and left out, rather than cached wrong. Results are written
+to `data/processed/catchments.json` after every kept river (not just at the
 end), since a run over ~600 rivers is long enough to hit an unrecoverable
 native crash that no Python `except` can catch.
 
 **Known difficulties:**
 
-- **Confluence pixel ambiguity** — the sharpest one in practice. When a
-  tributary's true mouth sits only one or two DEM cells from a much larger
-  trunk stream, the accumulation-threshold snap has no way to prefer the
-  tributary's own (small) inflow cell over the neighbouring trunk cell — it
-  just grabs whichever qualifying cell is nearest. Confirmed case: *Ruisseau
-  d'Aube*, whose vector outlet sits one cell from the Neste du Louron's
-  ~18,000-cell channel; the snap locked onto the trunk stream and
-  `grid.catchment()` faithfully delineated *that* basin instead — a
-  plausible-looking but wrong 12.7 km² polygon, with only 3% of Aube's own
-  course inside it (correctly flagged by `course_inside_frac`, but not
-  rejected — the batch's only hard gate is measured area, so a wrong-basin
-  result can still pass through it and get cached).
-- **Not actually recursive** — the batch driver iterates the upstream-river
-  list flatly: each river gets its own from-scratch DEM condition + trace,
-  with no reuse of a parent's flow grid and no check that a child's polygon
-  nests inside its parent's. The `[5, 150] km²` area filter discards small
+- **The pour-point search is still per-river, not per-tile** — the batch
+  driver iterates the upstream-river list flatly: each river gets its own
+  from-scratch DEM condition (once, now shared across that river's own
+  search candidates — see above — but not across *different* rivers), with
+  no reuse of a parent's flow grid and no check that a child's polygon nests
+  inside its parent's. The `[5, 150] km²` area filter discards small
   headwater tributaries outright rather than merging them into anything, so
-  "recursive" here is closer to "batched over the ancestor list" than a true
-  tree composition.
+  "recursive" here is closer to "batched over the ancestor list, searched per
+  river" than a true tree composition.
+- **The search widens the confluence-ambiguity window, it doesn't eliminate
+  it** — a hairpin or braid wider than the largest offset tried (1100 m) would
+  still fail the same way Aube used to; 0.9 is a judgement call, not a proof.
+  A river reported "undetermined" needs either a bigger offset range, a
+  higher-resolution DEM for that one spot, or a manual override — there's no
+  general fix left to find purely in the pour-point snap.
 - **Native crash on sparse tiles** — pysheds 0.5's `grid.catchment()` has
   been observed to corrupt memory (`double free or corruption`, an
   unrecoverable C-level abort, not a catchable Python exception) when a

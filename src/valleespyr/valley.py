@@ -19,14 +19,22 @@ and a river id (or a name), it:
   the mapped streams;
 * :func:`delineate_river` — run the whole chain (fetch tile → snap outlet →
   delineate) and hand back the polygon plus a diagnostics dict that also says
-  how much of the river's own course landed inside it.
+  how much of the river's own course landed inside it;
+* :func:`delineate_river_search` — the same, but for the confluence cases
+  where a single outlet snap locks onto a neighbouring parent river's basin
+  instead of the tributary's own: tries several :func:`upstream_offset_point`
+  / accumulation-threshold combinations against one shared conditioned grid
+  and keeps whichever best matches the river's own mapped course, or reports
+  "undetermined" rather than caching a wrong polygon.
 
-Only the ``valley render`` CLI path calls :func:`delineate_river`, and that path
-already requires the ``dem`` / ``render`` extras; :func:`resolve_river`,
-:func:`outlet_point` and :func:`catchment_bbox` are pure graph + shapely work.
-The heavy :mod:`valleespyr.hydro.dem` import (rasterio, geopandas) is therefore
-done **inside** :func:`delineate_river`, so importing this module stays cheap for
-the callers that only need the graph helpers.
+Only the ``valley render`` CLI path calls :func:`delineate_river` /
+:func:`delineate_river_search`, and that path already requires the ``dem`` /
+``render`` extras; :func:`resolve_river`, :func:`outlet_point`,
+:func:`upstream_offset_point` and :func:`catchment_bbox` are pure graph +
+shapely work. The heavy :mod:`valleespyr.hydro.dem` import (rasterio,
+geopandas) is therefore done **inside** the delineation functions, so
+importing this module stays cheap for callers that only need the graph
+helpers.
 """
 
 from __future__ import annotations
@@ -175,6 +183,85 @@ def outlet_point(rn: RiverNetwork, river_id: str) -> tuple[float, float]:
     if geom is None:
         raise RuntimeError(f"outlet tronçon of {river_id!r} has no geometry")
     return _downstream_end(geom, data.get("flow"))
+
+
+# --------------------------------------------------------------- upstream offset point
+
+
+def _ordered_coords(data: dict) -> list[tuple[float, float]]:
+    """A tronçon edge's own coords, ordered downstream (last point == its ``v`` node)."""
+    geom = data.get("geometry")
+    line = geom if geom.geom_type == "LineString" else list(geom.geoms)[-1]
+    coords = [(float(x), float(y)) for x, y in line.coords]
+    return list(reversed(coords)) if data.get("flow") == _FLOW_INVERSE else coords
+
+
+def upstream_offset_point(
+    rn: RiverNetwork, river_id: str, offset_m: float
+) -> tuple[float, float] | None:
+    """A point ``offset_m`` upstream of the outlet, walked along the river's own edges.
+
+    Starting from the outflow node used by :func:`outlet_point`, walks the
+    river's tronçon graph upstream (the longest in-edge at each node, same tie
+    break as :func:`outlet_point`'s downstream walk), accumulating edge length
+    until ``offset_m`` is reached, then interpolates the exact point on that
+    edge. Returns ``None`` if the river's own network is shorter than
+    ``offset_m`` (the walk runs out of upstream edges first).
+
+    This exists because a river's outlet coordinate sits *at* its confluence
+    with its parent — exactly where a pour-point snap is most likely to lock
+    onto the parent's much larger channel instead (see
+    :func:`delineate_river_search`). Offsetting upstream along the river's own
+    mapped course, rather than snapping straight onto the DEM at the mouth,
+    gives the snap a point that is actually inside this river's own catchment.
+    """
+    river = rn.get(river_id)
+    if river is None:
+        raise ValueError(f"unknown river id {river_id!r}")
+
+    troncons = rn._troncons
+    segs = river.segments
+    river_edges = [(u, v, d) for u, v, d in troncons.edges(data=True) if d.get("cleabs") in segs]
+    if not river_edges:
+        raise RuntimeError(f"river {river_id!r} has no tronçon geometry")
+    heads = {u for u, _v, _d in river_edges}
+    tails = {v for _u, v, _d in river_edges}
+    outflows = tails - heads
+    node = river.outlet if river.outlet in (heads | tails) else (min(outflows) if outflows else min(heads | tails))
+
+    def _prev_edge(n: str):
+        cands = [(u, v, d) for u, v, d in troncons.in_edges(n, data=True) if d.get("cleabs") in segs]
+        if not cands:
+            return None
+        return max(cands, key=lambda e: (e[2].get("length_m") or 0.0, e[2].get("cleabs") or ""))
+
+    if offset_m <= 0:
+        return outlet_point(rn, river_id)
+
+    accumulated = 0.0
+    seen: set[str] = set()
+    while node not in seen:
+        seen.add(node)
+        edge = _prev_edge(node)
+        if edge is None:
+            return None
+        u, _v, data = edge
+        seg_len_m = data.get("length_m") or 0.0
+        coords = _ordered_coords(data)  # coords[-1] is downstream (this edge's v)
+        if accumulated + seg_len_m >= offset_m:
+            need = offset_m - accumulated
+            cum = 0.0
+            for i in range(len(coords) - 1, 0, -1):
+                p1, p2 = coords[i], coords[i - 1]
+                seg_m = LineString([p1, p2]).length * 111_320
+                if cum + seg_m >= need:
+                    frac = (need - cum) / seg_m if seg_m > 0 else 0.0
+                    return (p1[0] + (p2[0] - p1[0]) * frac, p1[1] + (p2[1] - p1[1]) * frac)
+                cum += seg_m
+            return coords[0]
+        accumulated += seg_len_m
+        node = u
+    return None
 
 
 # ---------------------------------------------------------------------- catchment bbox
@@ -339,9 +426,131 @@ def delineate_river(
     return poly, diag
 
 
+# ------------------------------------------------------------- search delineation
+
+# Upstream offsets (metres) tried when the outlet snap lands on a confluence
+# ambiguity. 0 is always tried first (most rivers need no offset at all); the
+# rest climb past a plausible confluence-braid zone — confirmed on Ruisseau
+# d'Aube/Neste du Louron, whose two channels are indistinguishable in COP30
+# for ~1 km above their confluence (see METHOD.md).
+_SEARCH_OFFSETS_M: tuple[float, ...] = (0, 100, 200, 300, 500, 700, 900, 1100)
+
+# Accumulation thresholds tried at each offset. A wrong (too-high) threshold
+# for a small tributary either finds no channel near the offset point or grabs
+# an unrelated small rivulet, not the tributary's own integrated channel — see
+# METHOD.md. Trying a couple of thresholds per offset costs nothing extra
+# (same conditioned grid), and removes the need to hand-tune this per river.
+_SEARCH_ACC_THRESHOLDS: tuple[int, ...] = (200, 1000)
+
+# Minimum course_inside_frac (see _course_inside_frac) for a candidate to be
+# accepted at all. Below this the delineation is judged wrong, not just noisy.
+_SEARCH_MIN_INSIDE_FRAC = 0.9
+
+
+def delineate_river_search(
+    rn: RiverNetwork,
+    river_id: str,
+    *,
+    dem_dir: Path | None = None,
+    demtype: str = "COP30",
+    dem_source: str = "s3",
+    offsets_m: tuple[float, ...] = _SEARCH_OFFSETS_M,
+    acc_thresholds: tuple[int, ...] = _SEARCH_ACC_THRESHOLDS,
+    min_inside_frac: float = _SEARCH_MIN_INSIDE_FRAC,
+) -> tuple[BaseGeometry, dict] | None:
+    """Delineate ``river_id`` by searching pour points, not trusting one snap.
+
+    :func:`delineate_river` snaps the vector outlet straight onto the DEM
+    channel. That works for most rivers, but fails hard right at a confluence
+    with a much bigger parent: the snap has no way to prefer the tributary's
+    own (small) inflow cell over the neighbouring trunk cell, and can lock
+    onto the *parent's* basin instead — a plausible-looking, wrong polygon
+    (confirmed case: Ruisseau d'Aube locking onto la Neste du Louron, see
+    METHOD.md). A low ``course_inside_frac`` flags this after the fact but
+    :func:`delineate_river` still returns the wrong polygon.
+
+    This function turns that check into a search instead of a warning: it
+    tries :func:`upstream_offset_point` at each of ``offsets_m`` (0 first —
+    most rivers need no offset), each against ``acc_thresholds``, traces a
+    catchment for every combination against **one shared conditioned DEM
+    grid** (:func:`~valleespyr.hydro.dem.condition` is only run once), and
+    keeps the highest-``course_inside_frac`` candidate — but only if that
+    fraction clears ``min_inside_frac``. Returns ``None`` (rather than a
+    guess) when no candidate clears the bar; the caller should treat that as
+    "undetermined", not silently accept a low-confidence polygon.
+
+    Returns ``(polygon, diag)`` on success, with the same keys as
+    :func:`delineate_river`'s ``diag`` plus:
+
+    * ``offset_m`` — the upstream offset (metres) of the winning candidate;
+    * ``acc_channel_cells`` — the accumulation threshold of the winning candidate;
+    * ``n_candidates`` — how many (offset, threshold) combinations were tried.
+    """
+    from valleespyr.hydro import dem as _dem
+
+    bbox = catchment_bbox(rn, river_id)
+
+    if dem_source == "s3":
+        tif = _dem.fetch_dem_s3(bbox, dem_dir=dem_dir)
+    elif dem_source == "opentopography":
+        dest: Path | None = None
+        if dem_dir is not None:
+            dem_dir.mkdir(parents=True, exist_ok=True)
+            dest = dem_dir / f"{demtype}_{river_id}.tif"
+        tif = _dem.fetch_dem(bbox, dest, demtype=demtype)
+    else:
+        raise ValueError(f"unknown dem_source {dem_source!r} (expected 's3' or 'opentopography')")
+
+    conditioned = _dem.condition(tif)
+    course_fc = rn.river_path_geojson(river_id)
+
+    best: tuple[BaseGeometry, dict, float, float, int] | None = None  # poly, diag, frac, offset, acc_th
+    n_tried = 0
+    for offset_m in offsets_m:
+        point = upstream_offset_point(rn, river_id, offset_m)
+        if point is None:
+            continue
+        for acc_th in acc_thresholds:
+            n_tried += 1
+            try:
+                poly, diag = _dem.trace(conditioned, point[0], point[1], acc_channel_cells=acc_th)
+            except RuntimeError:
+                continue
+            frac = _course_inside_frac(course_fc, poly)
+            if best is None or frac > best[2]:
+                best = (poly, diag, frac, offset_m, acc_th)
+            if frac >= 0.99:  # near-perfect match, no point searching further
+                break
+        if best is not None and best[2] >= 0.99:
+            break
+
+    if best is None or best[2] < min_inside_frac:
+        logger.warning(
+            "%s: no pour-point candidate reached course_inside_frac >= %.2f "
+            "over %d tried (best %.2f) - treating as undetermined",
+            river_id,
+            min_inside_frac,
+            n_tried,
+            0.0 if best is None else best[2],
+        )
+        return None
+
+    poly, diag, frac, offset_m, acc_th = best
+    diag["course_inside_frac"] = frac
+    diag["outlet_lonlat"] = upstream_offset_point(rn, river_id, offset_m)
+    diag["dem_bbox"] = bbox
+    diag["dem_tif"] = str(tif)
+    diag["offset_m"] = offset_m
+    diag["acc_channel_cells"] = acc_th
+    diag["n_candidates"] = n_tried
+    return poly, diag
+
+
 __all__ = [
     "resolve_river",
     "outlet_point",
+    "upstream_offset_point",
     "catchment_bbox",
     "delineate_river",
+    "delineate_river_search",
 ]

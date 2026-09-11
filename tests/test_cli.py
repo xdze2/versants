@@ -2,9 +2,10 @@
 
 The command's pure logic (skip-if-WFS-covered, skip-if-already-cached, the
 area-range keep/discard decision, and the merged JSON shape) is exercised via
-Click's ``CliRunner`` with ``valleespyr.valley.delineate_river`` monkeypatched
-to a canned result — no real DEM / OpenTopography / pysheds call is made, so
-this runs without the ``dem`` extra or ``OPENTOPOGRAPHY_API_KEY``.
+Click's ``CliRunner`` with ``valleespyr.valley.delineate_river_search``
+monkeypatched to a canned result — no real DEM / OpenTopography / pysheds
+call is made, so this runs without the ``dem`` extra or
+``OPENTOPOGRAPHY_API_KEY``.
 """
 
 from __future__ import annotations
@@ -65,18 +66,21 @@ def _canned_diag(area_km2: float) -> dict:
         "outlet_lonlat": (-0.03, 42.78),
         "dem_bbox": (-0.05, 42.75, 0.03, 42.83),
         "dem_tif": "/tmp/fake.tif",
+        "offset_m": 0,
+        "acc_channel_cells": 200,
+        "n_candidates": 1,
     }
 
 
 def _patch_delineate_river(monkeypatch, area_by_id: dict[str, float]):
-    """Stub valley.delineate_river to hand back a canned polygon/diag per river id."""
+    """Stub valley.delineate_river_search to hand back a canned polygon/diag per river id."""
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         area = area_by_id.get(river_id, 42.0)
         return _canned_polygon(), _canned_diag(area)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
 
 # --------------------------------------------------------------------------- basics
@@ -98,11 +102,11 @@ def test_precompute_defaults_to_s3_dem_source(tmp_path: Path, monkeypatch):
     seen_sources: list[str] = []
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         seen_sources.append(kwargs.get("dem_source"))
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -120,11 +124,11 @@ def test_precompute_dem_source_flag_is_passed_through(tmp_path: Path, monkeypatc
     seen_sources: list[str] = []
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         seen_sources.append(kwargs.get("dem_source"))
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -258,11 +262,11 @@ def test_precompute_is_incremental(tmp_path: Path, monkeypatch):
 
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         calls.append(river_id)
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -311,11 +315,11 @@ def test_precompute_skips_wfs_covered_rivers(tmp_path: Path, monkeypatch):
     calls: list[str] = []
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         calls.append(river_id)
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -347,12 +351,12 @@ def test_precompute_continues_after_one_river_fails(tmp_path: Path, monkeypatch)
 
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         if river_id == "CDE_TRIB":
             raise RuntimeError("[delineate] empty catchment - the snap landed off the network")
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -393,7 +397,7 @@ def test_precompute_stops_and_saves_on_opentopography_rate_limit(tmp_path: Path,
 
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         if river_id == "CDE_TRIB":
             raise requests.exceptions.HTTPError(
                 "401 Client Error — response body: "
@@ -401,7 +405,7 @@ def test_precompute_stops_and_saves_on_opentopography_rate_limit(tmp_path: Path,
             )
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -439,14 +443,14 @@ def test_precompute_skips_river_on_non_rate_limit_http_error(tmp_path: Path, mon
 
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         if river_id == "CDE_TRIB":
             raise requests.exceptions.HTTPError(
                 "401 Client Error — response body: <error>Error: invalid API key</error>"
             )
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -478,12 +482,12 @@ def test_precompute_skips_river_on_unexpected_error(tmp_path: Path, monkeypatch)
 
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         if river_id == "CDE_TRIB":
             raise IndexError("index 0 is out of bounds for axis 0 with size 0")
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     result = CliRunner().invoke(
         cli,
@@ -551,13 +555,13 @@ def test_precompute_saves_incrementally_before_an_unrecoverable_crash(
     kept_so_far: list[str] = []
     import valleespyr.valley as valley_mod
 
-    def fake_delineate_river(rn, river_id, **kwargs):
+    def fake_delineate_river_search(rn, river_id, **kwargs):
         if len(kept_so_far) >= 1:
             raise BaseException("simulated native crash (e.g. GDAL double free)")  # noqa: TRY002
         kept_so_far.append(river_id)
         return _canned_polygon(), _canned_diag(60.0)
 
-    monkeypatch.setattr(valley_mod, "delineate_river", fake_delineate_river)
+    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
 
     with pytest.raises(BaseException, match="simulated native crash"):
         CliRunner().invoke(

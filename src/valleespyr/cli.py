@@ -662,13 +662,6 @@ def valley_catchments() -> None:
 )
 @click.option("--demtype", default="COP30", show_default=True, help="OpenTopography DEM type.")
 @click.option(
-    "--acc-channel-cells",
-    type=int,
-    default=1000,
-    show_default=True,
-    help="Flow-accumulation threshold (cells) that defines a channel for the snap.",
-)
-@click.option(
     "--area-min",
     "area_min",
     type=float,
@@ -703,7 +696,6 @@ def valley_catchments_precompute(
     dem_dir: str,
     dem_source: str,
     demtype: str,
-    acc_channel_cells: int,
     area_min: float | None,
     area_max: float | None,
     out_path: str,
@@ -716,11 +708,15 @@ def valley_catchments_precompute(
     command fills that gap offline, ahead of time: for every river in
     ROOT_QUERY's upstream network that isn't already covered by ``--bassins``
     (when given) or already present in ``--out``, it delineates a catchment from
-    a Copernicus DEM (:func:`valleespyr.valley.delineate_river`) and keeps the
-    result only if the *measured* area falls in ``[--area-min, --area-max]`` —
-    the same "reads as one valley" range ``valleespyr catalog`` uses. Load the
-    output's ``"rivers"`` dict and pass it as ``build_catalog(..., dem_catchments=...)``
-    to use it.
+    a Copernicus DEM (:func:`valleespyr.valley.delineate_river_search`, which
+    tries several pour points to survive confluence ambiguity — see
+    METHOD.md) and keeps the result only if the *measured* area falls in
+    ``[--area-min, --area-max]`` — the same "reads as one valley" range
+    ``valleespyr catalog`` uses. A river whose search finds no confident pour
+    point (``course_inside_frac`` never clears 0.9) is counted separately as
+    "undetermined" and left out of the output rather than cached wrong. Load
+    the output's ``"rivers"`` dict and pass it as
+    ``build_catalog(..., dem_catchments=...)`` to use it.
 
     Needs the ``dem`` extra installed. With the default ``--dem-source s3``
     (public, unauthenticated Copernicus tiles) no API key or quota applies.
@@ -767,6 +763,7 @@ def valley_catchments_precompute(
     n_skipped_cached = 0
     n_kept = 0
     n_discarded = 0
+    n_undetermined = 0
     n_failed = 0
     stopped_early = None
 
@@ -775,7 +772,6 @@ def valley_catchments_precompute(
         payload = {
             "meta": {
                 "demtype": demtype,
-                "acc_channel_cells": acc_channel_cells,
                 "area_min_km2": area_min,
                 "area_max_km2": area_max,
                 "root_id": root.id,
@@ -795,12 +791,11 @@ def valley_catchments_precompute(
                 continue
 
         try:
-            poly, diag = valley_mod.delineate_river(
+            result = valley_mod.delineate_river_search(
                 rn,
                 river.id,
                 dem_dir=Path(dem_dir),
                 demtype=demtype,
-                acc_channel_cells=acc_channel_cells,
                 dem_source=dem_source,
             )
         except requests.exceptions.HTTPError as exc:
@@ -832,6 +827,15 @@ def valley_catchments_precompute(
             n_failed += 1
             continue
 
+        if result is None:
+            # No candidate pour point reached course_inside_frac >= 0.9 - a
+            # confluence too ambiguous for this DEM to resolve (see
+            # METHOD.md). Left out rather than cached wrong.
+            click.echo(f"undetermined {river.name or river.id}: no confident pour point", err=True)
+            n_undetermined += 1
+            continue
+        poly, diag = result
+
         area = diag["area_km2"]
         if not (area_min <= area <= area_max):
             click.echo(
@@ -854,9 +858,16 @@ def valley_catchments_precompute(
             "source": "dem",
             "outlet_lonlat": list(diag["outlet_lonlat"]),
             "snap_moved_cells": diag["snap_moved_cells"],
+            "offset_m": diag["offset_m"],
+            "acc_channel_cells": diag["acc_channel_cells"],
+            "course_inside_frac": round(diag["course_inside_frac"], 3),
         }
         n_kept += 1
-        click.echo(f"kept {river.name or river.id}: {area:.1f} km²", err=True)
+        click.echo(
+            f"kept {river.name or river.id}: {area:.1f} km² "
+            f"(offset {diag['offset_m']:.0f}m, inside {diag['course_inside_frac']:.0%})",
+            err=True,
+        )
         # write after every kept river, not just at the end: a batch this size
         # runs long enough to hit an unrecoverable native crash (GDAL/rasterio
         # memory corruption, a killed process, ...) that no Python except can
@@ -870,7 +881,8 @@ def valley_catchments_precompute(
         f"{len(candidates)} river(s) considered under {root.name or root.id}: "
         f"{n_kept} kept, {n_skipped_wfs} skipped (WFS-covered), "
         f"{n_skipped_cached} skipped (already cached), "
-        f"{n_discarded} discarded (out of area range), {n_failed} failed",
+        f"{n_discarded} discarded (out of area range), "
+        f"{n_undetermined} undetermined (no confident pour point), {n_failed} failed",
         err=True,
     )
     click.echo(f"wrote {out_file} ({len(rivers_out)} total cached river(s))", err=True)
