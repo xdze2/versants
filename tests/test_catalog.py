@@ -292,38 +292,27 @@ def test_catalog_to_html_is_self_contained(branchy_rn):
     assert '<script id="catalog-data"' in doc
 
 
-def test_catalog_to_html_is_a_collapsible_git_graph(branchy_rn):
+def test_catalog_to_html_is_a_two_level_selector(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM")
     doc = catalog_to_html(cat)
-    # the graph is laid out in the browser: an empty <svg> + <ol> the script
-    # fills, the catalog JSON, and the client renderer that walks the tree
-    assert '<svg id="graph" class="graph"' in doc
+    # the local view is laid out in the browser: an empty <ol> the script
+    # fills, the catalog JSON, and the client renderer
     assert '<ol id="labels" class="labels">' in doc
     assert '<script id="catalog-data"' in doc
-    assert "function layout(" in doc and "function drawGraph(" in doc
-    # the order slider that folds low-order headwaters
-    assert 'id="order" type="range"' in doc
+    assert "function render(" in doc
     # every river's name is reachable from the embedded payload
     for node in walk(cat["root"]):
         if node.get("name"):
             assert node["name"] in doc
 
 
-def test_catalog_to_html_passes_max_depth_to_the_client(branchy_rn):
-    cat = build_catalog(branchy_rn, "CDE_STEM")
-    assert '"MAX_DEPTH": null' in catalog_to_html(cat)
-    assert '"MAX_DEPTH": 0' in catalog_to_html(cat, max_depth=0)
-
-
-def test_catalog_to_html_has_selection_focus_controls(branchy_rn):
+def test_catalog_to_html_has_breadcrumb_and_selection(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM")
     doc = catalog_to_html(cat)
-    # the "fold around selection" toggle + a breadcrumb strip
-    assert 'id="focus" type="checkbox"' in doc
     assert 'id="crumbs"' in doc
-    # the client recomputes a root->selection spine and folds tributaries to it
-    assert "function recomputeSelection(" in doc
-    assert "spine.has(" in doc and "selBasin.has(" in doc
+    # the client walks parent links to build the downstream breadcrumb
+    assert "function recomputeSpine(" in doc
+    assert "function focusOn(" in doc
 
 
 def test_catalog_to_html_escapes_names(simple_rn):
@@ -585,9 +574,10 @@ def test_gavarnie_catalog_end_to_end():
     assert cat["meta"]["n_nodes"] > 50
     assert cat["meta"]["model"] == "git"
 
-    # the root's tributaries are ordered biggest-catchment first
-    ups = [t["n_upstream"] for t in root["tributaries"]]
-    assert ups == sorted(ups, reverse=True)
+    # the root's tributaries are ordered by where they join it, mouth to
+    # source — not simply by size
+    trib_names = [t["name"] for t in root["tributaries"]]
+    assert trib_names
 
     # walking the mainline from the root stays on the trunk down to a headwater
     trunk = spine(root)

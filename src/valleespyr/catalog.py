@@ -21,7 +21,8 @@ So each node here splits its upstream neighbours into:
   sub-catchment. Walking ``mainline`` repeatedly follows the trunk to its
   source. ``None`` at a headwater.
 * **``tributaries``** — every other child, each the tip of a branch that
-  *merges* into this lineage at this confluence. Biggest sub-catchment first.
+  *merges* into this lineage at this confluence. Ordered by where it joins,
+  mouth to source — the order you'd meet them walking upstream on the map.
 
 A river with more than one downstream (a real bifurcation — anabranch, delta,
 canal tap) is attached under its first downstream in topological order (``git``'s
@@ -408,6 +409,58 @@ def _primary_children(rn: RiverNetwork, river_id: str) -> list[River]:
     return out
 
 
+def _join_order(rn: RiverNetwork, river_id: str, child_ids: set[str]) -> dict[str, int]:
+    """Rank of each id in ``child_ids`` by where it joins ``river_id``, mouth first.
+
+    Walks ``river_id``'s own tronçon chain upstream from its outlet, following
+    only edges that resolve back to ``river_id``; each step, checks whether the
+    node just left behind is the join point of one of ``child_ids`` (the
+    tronçon-graph successor of that child's own outlet). The order those join
+    points are crossed *is* the order you would meet the tributaries walking
+    upstream on the map — rank 0 is the one nearest the mouth.
+
+    Ids that never resolve to a join point on this walk (a stray topology edge
+    case) are simply absent from the returned dict; the caller falls back to
+    another sort key for those.
+    """
+    river = rn.get(river_id)
+    if river is None or river.outlet is None or not child_ids:
+        return {}
+    troncons = rn._troncons
+    segment_to_river = rn.segment_to_river
+
+    def edge_river(u: str, v: str) -> str | None:
+        data = troncons.get_edge_data(u, v) or {}
+        cleabs = data.get("cleabs")
+        return segment_to_river.get(cleabs) if cleabs is not None else None
+
+    # join node (on river_id's own chain) -> child id, for every requested child
+    join_node_of: dict[str, str] = {}
+    for cid in child_ids:
+        child = rn.get(cid)
+        if child is None or child.outlet is None:
+            continue
+        for w in troncons.successors(child.outlet):
+            if edge_river(child.outlet, w) == river_id:
+                join_node_of[w] = cid
+                break
+
+    order: dict[str, int] = {}
+    seen: set[str] = set()
+    node = river.outlet
+    while node is not None and node not in seen:
+        seen.add(node)
+        if node in join_node_of:
+            order.setdefault(join_node_of[node], len(order))
+        nxt = None
+        for u in troncons.predecessors(node):
+            if edge_river(u, node) == river_id:
+                nxt = u
+                break
+        node = nxt
+    return order
+
+
 def _partition_children(
     rn: RiverNetwork, river_id: str
 ) -> tuple[str | None, list[str]]:
@@ -420,10 +473,10 @@ def _partition_children(
     river's exact toponyme wins even if another child drains more; the
     ``cours_d_eau`` roll-up means this almost never fires.
 
-    **Tributaries** = every other primary child, ordered biggest sub-catchment
-    first (then length, then id) — BD TOPO tags short trunk-split connectors
-    near a big confluence with the trunk's own Strahler order, so order is not a
-    reliable sort key here.
+    **Tributaries** = every other primary child, ordered by where it joins the
+    river — mouth to source, the order you would meet them walking upstream on
+    the map — falling back to biggest sub-catchment first (then length, then
+    id) for any child :func:`_join_order` couldn't place.
     """
     kids = _primary_children(rn, river_id)
     if not kids:
@@ -432,18 +485,26 @@ def _partition_children(
     river = rn.get(river_id)
     size = {c.id: len(rn.upstream_rivers(c.id)) for c in kids}
 
-    def rank(c: River) -> tuple:
+    def size_rank(c: River) -> tuple:
         return (-size[c.id], -c.length_m, c.name or c.id)
 
     mainline: River | None = None
     if river is not None and river.name:
         named_same = [c for c in kids if c.name == river.name]
         if named_same:
-            mainline = min(named_same, key=rank)
+            mainline = min(named_same, key=size_rank)
     if mainline is None:
-        mainline = min(kids, key=rank)
+        mainline = min(kids, key=size_rank)
 
-    tribs = sorted((c for c in kids if c.id != mainline.id), key=rank)
+    trib_kids = [c for c in kids if c.id != mainline.id]
+    join_order = _join_order(rn, river_id, {c.id for c in trib_kids})
+
+    def trib_rank(c: River) -> tuple:
+        # placed tributaries sort mouth-first by their join rank; anything the
+        # walk couldn't place falls in after them, by the old size-based rank.
+        return (0, join_order[c.id]) if c.id in join_order else (1, size_rank(c))
+
+    tribs = sorted(trib_kids, key=trib_rank)
     return mainline.id, [c.id for c in tribs]
 
 
