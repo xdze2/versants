@@ -197,7 +197,14 @@ native crash that no Python `except` can catch.
   tile's channel mask has 0–1 cells above `ACC_CHANNEL_CELLS`. Guarded by a
   `MIN_CHANNEL_CELLS` (5) check that raises a clean `RuntimeError` before
   ever calling `grid.catchment()` on a tile that sparse — found by bisecting
-  a reproducible segfault down to one specific river/tile.
+  a reproducible segfault down to one specific river/tile. That guard isn't
+  airtight, though (a tile with ≥5 channel cells has still been seen to
+  crash) — the batch precompute (`valley catchments precompute`) no longer
+  relies on it alone: it delineates each river in its own subprocess (the
+  hidden `valley catchments _delineate-one` worker, dispatched via
+  `cli._delineate_one_subprocess`), so a native abort only kills that one
+  subprocess — surfaced to the batch as an ordinary "crashed, retry next run"
+  outcome — instead of the whole run.
 - **DEM tile cache doesn't actually share tiles across rivers**, despite the
   intent described in `hydro/dem.py`'s docstring. `fetch_dem_s3` names its
   *cropped/mosaicked* output file by the exact padded bbox it was called

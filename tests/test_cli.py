@@ -2,10 +2,14 @@
 
 The command's pure logic (skip-if-WFS-covered, skip-if-already-cached, the
 area-range keep/discard decision, and the merged JSON shape) is exercised via
-Click's ``CliRunner`` with ``valleespyr.valley.delineate_river_search``
-monkeypatched to a canned result — no real DEM / OpenTopography / pysheds
-call is made, so this runs without the ``dem`` extra or
-``OPENTOPOGRAPHY_API_KEY``.
+Click's ``CliRunner`` with ``valleespyr.cli._delineate_one_subprocess``
+monkeypatched to a canned result — no real subprocess, DEM, OpenTopography or
+pysheds call is made, so this runs without the ``dem`` extra or
+``OPENTOPOGRAPHY_API_KEY``. Each river is delineated in its own subprocess in
+production (see ``_delineate_one_subprocess``'s docstring) precisely so that
+pysheds' occasional unrecoverable native crash only takes down that one
+subprocess rather than the whole batch — that boundary is exactly the seam
+these tests stub out.
 """
 
 from __future__ import annotations
@@ -51,8 +55,8 @@ def _write_troncons(path: Path) -> None:
     gdf.to_file(path, driver="GeoJSON")
 
 
-def _canned_polygon() -> Polygon:
-    return Polygon([(-0.05, 42.75), (0.03, 42.75), (0.03, 42.83), (-0.05, 42.83)])
+def _canned_rings() -> list[list[list[float]]]:
+    return [[[-0.05, 42.75], [0.03, 42.75], [0.03, 42.83], [-0.05, 42.83], [-0.05, 42.75]]]
 
 
 def _canned_diag(area_km2: float) -> dict:
@@ -73,14 +77,19 @@ def _canned_diag(area_km2: float) -> dict:
 
 
 def _patch_delineate_river(monkeypatch, area_by_id: dict[str, float]):
-    """Stub valley.delineate_river_search to hand back a canned polygon/diag per river id."""
-    import valleespyr.valley as valley_mod
+    """Stub cli._delineate_one_subprocess to hand back a canned result per river id.
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    This is the boundary the real precompute loop crosses into a subprocess
+    (see ``_delineate_one_subprocess``) — stubbing it here keeps these tests
+    exercising the loop's own logic without spawning a real subprocess.
+    """
+    import valleespyr.cli as cli_mod
+
+    def fake(river_id, **kwargs):
         area = area_by_id.get(river_id, 42.0)
-        return _canned_polygon(), _canned_diag(area)
+        return (_canned_rings(), _canned_diag(area)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
 
 # --------------------------------------------------------------------------- basics
@@ -100,13 +109,13 @@ def test_precompute_defaults_to_s3_dem_source(tmp_path: Path, monkeypatch):
     out = tmp_path / "catchments.json"
 
     seen_sources: list[str] = []
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         seen_sources.append(kwargs.get("dem_source"))
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -122,13 +131,13 @@ def test_precompute_dem_source_flag_is_passed_through(tmp_path: Path, monkeypatc
     out = tmp_path / "catchments.json"
 
     seen_sources: list[str] = []
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         seen_sources.append(kwargs.get("dem_source"))
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -267,13 +276,13 @@ def test_precompute_is_incremental(tmp_path: Path, monkeypatch):
 
     calls: list[str] = []
 
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         calls.append(river_id)
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -320,13 +329,13 @@ def test_precompute_skips_wfs_covered_rivers(tmp_path: Path, monkeypatch):
     bassins.to_file(bassins_path, driver="GeoJSON")
 
     calls: list[str] = []
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         calls.append(river_id)
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -351,19 +360,87 @@ def test_precompute_skips_wfs_covered_rivers(tmp_path: Path, monkeypatch):
     assert payload["rivers"] == {}
 
 
+def test_precompute_skips_degenerate_bbox_without_calling_delineate(tmp_path: Path, monkeypatch):
+    """A near-point tronçon (e.g. a ~20m stray fragment, real case: 'Ruisseau
+    d'Areng' COURDEAU0000002491710079) has a catchment_bbox too narrow for any
+    DEM tile to crop — rasterio errors with 'Attempt to create 1x0 dataset'
+    once you actually try. That must be caught before spawning the delineate
+    subprocess at all (recorded as undetermined, not a crash to keep
+    retrying), since no bbox this narrow can ever be delineated."""
+    troncons = tmp_path / "troncons.geojson"
+    rows = [
+        ("MAIN_1", "N_s", "N_a", "2", "Main", "CDE_MAIN", [(-0.05, 42.80), (-0.03, 42.78)]),
+        ("MAIN_2", "N_a", "N_o", "3", "Main", "CDE_MAIN", [(-0.03, 42.78), (0.02, 42.76)]),
+        # A ~20m fragment: both endpoints round to the same DEM pixel.
+        ("TRIB_1", "N_t", "N_a", "1", "Trib", "CDE_TRIB", [(-0.03005, 42.78002), (-0.03000, 42.78000)]),
+    ]
+    gdf = gpd.GeoDataFrame(
+        {
+            "cleabs": [r[0] for r in rows],
+            "lien_vers_noeud_hydrographique_ini": [r[1] for r in rows],
+            "lien_vers_noeud_hydrographique_fin": [r[2] for r in rows],
+            "sens_de_l_ecoulement": ["Sens direct"] * len(rows),
+            "numero_d_ordre": [r[3] for r in rows],
+            "cpx_toponyme_de_cours_d_eau": [r[4] for r in rows],
+            "liens_vers_cours_d_eau": [r[5] for r in rows],
+            "fictif": [False] * len(rows),
+            "reseau_principal_coulant": [True] * len(rows),
+            "nature": ["Ecoulement naturel"] * len(rows),
+            "geometry": [LineString(r[6]) for r in rows],
+        },
+        crs="EPSG:4326",
+    )
+    gdf.to_file(troncons, driver="GeoJSON")
+    out = tmp_path / "catchments.json"
+
+    calls: list[str] = []
+    import valleespyr.cli as cli_mod
+
+    def fake(river_id, **kwargs):
+        calls.append(river_id)
+        return (_canned_rings(), _canned_diag(60.0)), None
+
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "valley",
+            "catchments",
+            "precompute",
+            "CDE_MAIN",
+            "--from-file",
+            str(troncons),
+            "-o",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # the degenerate CDE_TRIB never reaches _delineate_one_subprocess
+    assert calls == ["CDE_MAIN"]
+    assert "too narrow" in result.output
+
+    payload = json.loads(out.read_text("utf-8"))
+    assert payload["rivers"]["CDE_TRIB"]["source"] == "undetermined"
+
+
 def test_precompute_continues_after_one_river_fails(tmp_path: Path, monkeypatch):
+    """A river whose subprocess dies (crash, or any uncaught exception inside
+    it — see ``_delineate_one_subprocess``) is logged as a warning and
+    skipped, not resolved; the batch continues to the next river rather than
+    aborting."""
     troncons = tmp_path / "troncons.geojson"
     _write_troncons(troncons)
     out = tmp_path / "catchments.json"
 
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         if river_id == "CDE_TRIB":
-            raise RuntimeError("[delineate] empty catchment - the snap landed off the network")
-        return _canned_polygon(), _canned_diag(60.0)
+            return None, "subprocess exit 1: RuntimeError: empty catchment"
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -390,29 +467,26 @@ def test_precompute_stops_and_saves_on_opentopography_rate_limit(tmp_path: Path,
     stop the batch (no point trying the next river) but still write out
     whatever was already collected, so the run can resume later.
 
-    ``fetch_dem`` uses ``stream=True``, so by the time an ``HTTPError`` has
-    propagated out of it the underlying response is already closed and
-    ``exc.response.text`` reads back empty — the real body only survives
-    because ``fetch_dem`` folds it into the exception's own message (see
-    ``hydro/dem.py``). This test raises the error the same way: message-only,
-    no readable ``response``, matching what a caller actually receives."""
+    The real worker subprocess lets that ``HTTPError`` propagate uncaught, so
+    its message ends up in the subprocess's stderr tail that
+    ``_delineate_one_subprocess`` folds into ``crash_msg`` — this test stubs
+    that boundary directly with the same text."""
     troncons = tmp_path / "troncons.geojson"
     _write_troncons(troncons)
     out = tmp_path / "catchments.json"
 
-    import requests
+    import valleespyr.cli as cli_mod
 
-    import valleespyr.valley as valley_mod
-
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         if river_id == "CDE_TRIB":
-            raise requests.exceptions.HTTPError(
-                "401 Client Error — response body: "
-                "<error>Error: API maximum rate limit reached. (50 API calls/24hrs)</error>"
+            return None, (
+                "subprocess exit 1: requests.exceptions.HTTPError: 401 Client "
+                "Error — response body: <error>Error: API maximum rate limit "
+                "reached. (50 API calls/24hrs)</error>"
             )
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -446,18 +520,17 @@ def test_precompute_skips_river_on_non_rate_limit_http_error(tmp_path: Path, mon
     _write_troncons(troncons)
     out = tmp_path / "catchments.json"
 
-    import requests
+    import valleespyr.cli as cli_mod
 
-    import valleespyr.valley as valley_mod
-
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         if river_id == "CDE_TRIB":
-            raise requests.exceptions.HTTPError(
+            return None, (
+                "subprocess exit 1: requests.exceptions.HTTPError: "
                 "401 Client Error — response body: <error>Error: invalid API key</error>"
             )
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -481,20 +554,21 @@ def test_precompute_skips_river_on_non_rate_limit_http_error(tmp_path: Path, mon
 def test_precompute_skips_river_on_unexpected_error(tmp_path: Path, monkeypatch):
     """A real batch over ~600 rivers of actual terrain will hit edge cases
     (e.g. an empty flow-accumulation channel mask raising a raw IndexError
-    deep inside pysheds) that aren't RuntimeError or HTTPError. One river's
-    oddity must not sink the whole run."""
+    deep inside pysheds, or the subprocess dying to a native segfault
+    entirely) that aren't RuntimeError or HTTPError. One river's oddity must
+    not sink the whole run."""
     troncons = tmp_path / "troncons.geojson"
     _write_troncons(troncons)
     out = tmp_path / "catchments.json"
 
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         if river_id == "CDE_TRIB":
-            raise IndexError("index 0 is out of bounds for axis 0 with size 0")
-        return _canned_polygon(), _canned_diag(60.0)
+            return None, "subprocess exit -6: double free or corruption (out)"
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
     result = CliRunner().invoke(
         cli,
@@ -547,30 +621,34 @@ def test_precompute_saves_incrementally_before_an_unrecoverable_crash(
     tmp_path: Path, monkeypatch
 ):
     """A batch over hundreds of rivers runs long enough to hit a failure no
-    Python except can catch (e.g. the native GDAL/rasterio 'double free or
-    corruption' crash this guards against in practice). Writing the output
-    after every kept river — not just once at the end of the loop — means
-    such a crash loses at most the one river in flight, not everything since
-    the last save. A crash of that severity would kill the whole process in
-    reality; here a BaseException standing in for it is the sharpest way to
-    prove no Python-level except in this function could have caught it, so
-    only the incremental save protects prior progress."""
+    Python except could catch in-process — pysheds' native 'double free or
+    corruption' crash. That's exactly why each river is delineated in its own
+    subprocess (see ``_delineate_one_subprocess``): such a crash now only
+    kills that one subprocess, surfacing to the loop as an ordinary
+    ``crash_msg`` rather than taking the whole batch down with it.
+
+    This test simulates the one failure mode that *can* still kill the parent
+    outright (e.g. the process being killed, an OOM) with a ``BaseException``
+    raised directly in the loop, after the first river was already kept and
+    saved — proving the incremental ``_write_out()`` after every resolved
+    river protects prior progress even then, not just against the isolated
+    per-river crashes ``_delineate_one_subprocess`` now absorbs."""
     troncons = tmp_path / "troncons.geojson"
     _write_troncons_three_rivers(troncons)
     out = tmp_path / "catchments.json"
 
     kept_so_far: list[str] = []
-    import valleespyr.valley as valley_mod
+    import valleespyr.cli as cli_mod
 
-    def fake_delineate_river_search(rn, river_id, **kwargs):
+    def fake(river_id, **kwargs):
         if len(kept_so_far) >= 1:
-            raise BaseException("simulated native crash (e.g. GDAL double free)")  # noqa: TRY002
+            raise BaseException("simulated parent-process kill (e.g. OOM)")  # noqa: TRY002
         kept_so_far.append(river_id)
-        return _canned_polygon(), _canned_diag(60.0)
+        return (_canned_rings(), _canned_diag(60.0)), None
 
-    monkeypatch.setattr(valley_mod, "delineate_river_search", fake_delineate_river_search)
+    monkeypatch.setattr(cli_mod, "_delineate_one_subprocess", fake)
 
-    with pytest.raises(BaseException, match="simulated native crash"):
+    with pytest.raises(BaseException, match="simulated parent-process kill"):
         CliRunner().invoke(
             cli,
             [

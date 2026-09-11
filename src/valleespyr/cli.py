@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 import click
-import requests
 
 from . import watershed as ws
 from .dump import dump_layer
@@ -632,6 +632,125 @@ def valley_catchments() -> None:
     """Batch operations over many rivers' catchments (see 'precompute')."""
 
 
+@valley_catchments.command("_delineate-one", hidden=True)
+@click.argument("river_id")
+@click.option("--from-file", "from_file", default=None)
+@click.option("--bbox", "bbox_s", default=None)
+@click.option("--dem-dir", type=click.Path(file_okay=False), default="data/raw/dem")
+@click.option("--dem-source", type=click.Choice(["s3", "opentopography"]), default="s3")
+@click.option("--demtype", default="COP30")
+@click.option("-o", "--out", "out_path", type=click.Path(dir_okay=False), required=True)
+@click.pass_context
+def _valley_catchments_delineate_one(
+    ctx: click.Context,
+    river_id: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    dem_dir: str,
+    dem_source: str,
+    demtype: str,
+    out_path: str,
+) -> None:
+    """Delineate exactly one river, writing ``{"catchment_rings", "diag"}`` to ``--out``.
+
+    Internal worker for ``valley catchments precompute``, run as its own
+    subprocess per river: pysheds' ``grid.catchment()`` occasionally corrupts
+    memory in a way no Python ``except`` can catch (see METHOD.md), which used
+    to kill the whole batch. One river per process means that crash only takes
+    down this one subprocess — the parent sees a nonzero/signal exit and
+    records the river as undetermined instead of losing the whole run.
+    """
+    from pathlib import Path
+
+    from . import valley as valley_mod
+    from .catalog import polygon_to_rings
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+    result = valley_mod.delineate_river_search(
+        rn,
+        river_id,
+        dem_dir=Path(dem_dir),
+        demtype=demtype,
+        dem_source=dem_source,
+    )
+    if result is None:
+        Path(out_path).write_text(json.dumps({"undetermined": True}), encoding="utf-8")
+        return
+
+    poly, diag = result
+    rings = polygon_to_rings(poly)
+    Path(out_path).write_text(
+        json.dumps({"catchment_rings": rings, "diag": diag}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _delineate_one_subprocess(
+    river_id: str,
+    *,
+    from_file: str | None,
+    bbox_s: str | None,
+    dem_dir: str,
+    dem_source: str,
+    demtype: str,
+) -> tuple[tuple[Any, dict] | None, str | None]:
+    """Delineate one river in its own subprocess; return ``(result, crash_msg)``.
+
+    Exactly one of the two is non-``None``: ``result`` is ``None`` (river
+    undetermined) or ``(rings, diag)`` on success; ``crash_msg`` is set when
+    the subprocess died (segfault, uncaught exception, ...) instead — the
+    caller should treat that river as retryable, not resolved.
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "result.json"
+        args = [
+            sys.executable,
+            "-m",
+            "valleespyr.cli",
+            "valley",
+            "catchments",
+            "_delineate-one",
+            river_id,
+            "--dem-dir",
+            dem_dir,
+            "--dem-source",
+            dem_source,
+            "--demtype",
+            demtype,
+            "-o",
+            str(out_path),
+        ]
+        if from_file is not None:
+            args += ["--from-file", from_file]
+        if bbox_s is not None:
+            args += ["--bbox", bbox_s]
+
+        proc = subprocess.run(args, capture_output=True, text=True)
+        if proc.returncode != 0 or not out_path.exists():
+            tail = "\n".join(proc.stderr.strip().splitlines()[-5:])
+            return None, f"subprocess exit {proc.returncode}: {tail or '(no stderr)'}"
+
+        payload = json.loads(out_path.read_text("utf-8"))
+
+    if payload.get("undetermined"):
+        return None, None
+    return (payload["catchment_rings"], payload["diag"]), None
+
+
+# COP30 is ~30m/pixel (~0.00027° at Pyrenees latitudes); a catchment_bbox
+# narrower than this on either side can't yield a usable DEM crop at all — the
+# raster crop rounds to zero rows/columns and rasterio errors out
+# ("Attempt to create 1x0 dataset"). Real headwaters are always much wider
+# than this once catchment_bbox pads them; only a degenerate near-point or
+# near-zero-length tronçon (a data artifact, not a real river reach) is this
+# narrow. 10 pixels gives comfortable margin over the bare minimum.
+_MIN_BBOX_DEGREES = 0.003
+
+
 @valley_catchments.command("precompute")
 @click.argument("root_query")
 @click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
@@ -741,7 +860,7 @@ def valley_catchments_precompute(
     from pathlib import Path
 
     from . import valley as valley_mod
-    from .catalog import _VALLEY_AREA_MAX_KM2, _VALLEY_AREA_MIN_KM2, polygon_to_rings
+    from .catalog import _VALLEY_AREA_MAX_KM2, _VALLEY_AREA_MIN_KM2
 
     area_min = _VALLEY_AREA_MIN_KM2 if area_min is None else area_min
     area_max = _VALLEY_AREA_MAX_KM2 if area_max is None else area_max
@@ -771,6 +890,7 @@ def valley_catchments_precompute(
     n_discarded = 0
     n_undetermined = 0
     n_failed = 0
+    n_crashed = 0
     stopped_early = None
 
     def _write_out() -> None:
@@ -796,41 +916,48 @@ def valley_catchments_precompute(
                 n_skipped_wfs += 1
                 continue
 
-        try:
-            result = valley_mod.delineate_river_search(
-                rn,
-                river.id,
-                dem_dir=Path(dem_dir),
-                demtype=demtype,
-                dem_source=dem_source,
+        west, south, east, north = valley_mod.catchment_bbox(rn, river.id)
+        bbox_too_narrow = (east - west) < _MIN_BBOX_DEGREES or (north - south) < _MIN_BBOX_DEGREES
+
+        result: tuple[Any, dict] | None = None
+        crash_msg: str | None = None
+        undetermined_reason = "no confident pour point"
+        if bbox_too_narrow:
+            # A degenerate/near-point tronçon (e.g. a stray ~20m fragment) -
+            # no DEM tile this narrow can be cropped (rasterio errors with
+            # "Attempt to create 1x0 dataset"), and it could never reach
+            # area_min anyway. Undetermined (falls through below, like a
+            # search that found no confident pour point), not a crash to
+            # keep retrying.
+            undetermined_reason = (
+                f"catchment bbox too narrow for a DEM crop "
+                f"({(east - west):.5f}° x {(north - south):.5f}°)"
             )
-        except requests.exceptions.HTTPError as exc:
-            # OpenTopography's daily-quota rejection comes back as a 401 (not
-            # a 429) with a "rate limit" XML body — not "bad key", "no more
-            # calls today". fetch_dem() folds that body into the exception's
-            # own message (see hydro/dem.py) since by the time it reaches us
-            # here the underlying streamed response is already closed and
-            # exc.response.text would just be empty. This is the one failure
-            # that isn't specific to this river — stop the whole batch (after
-            # writing out what we have) instead of ploughing into the same
-            # wall for every river left.
-            if "rate limit" in str(exc).lower():
+        else:
+            result, crash_msg = _delineate_one_subprocess(
+                river.id,
+                from_file=from_file,
+                bbox_s=bbox_s,
+                dem_dir=dem_dir,
+                dem_source=dem_source,
+                demtype=demtype,
+            )
+        if crash_msg is not None:
+            if "rate limit" in crash_msg.lower():
+                # OpenTopography's daily-quota rejection comes back as a 401
+                # (not a 429) with a "rate limit" XML body — not "bad key",
+                # "no more calls today". This is the one failure that isn't
+                # specific to this river — stop the whole batch (after
+                # writing out what we have) instead of ploughing into the
+                # same wall for every river left.
                 stopped_early = (
                     "hit OpenTopography's daily rate limit "
                     f"({river.name or river.id} was next) — re-run this "
                     "command later today or tomorrow to pick up where it left off"
                 )
                 break
-            click.echo(f"warning: {river.name or river.id}: {exc}", err=True)
-            n_failed += 1
-            continue
-        except Exception as exc:  # noqa: BLE001 - a batch over ~600 rivers of
-            # real terrain will hit edge cases pysheds doesn't raise a
-            # RuntimeError for (e.g. an empty channel mask -> IndexError deep
-            # inside grid.snap_to_mask when a tile has no cell above
-            # acc_channel_cells). One river's oddity shouldn't sink the run.
-            click.echo(f"warning: {river.name or river.id}: {exc}", err=True)
-            n_failed += 1
+            click.echo(f"warning: {river.name or river.id}: {crash_msg}", err=True)
+            n_crashed += 1
             continue
 
         if result is None:
@@ -839,11 +966,11 @@ def valley_catchments_precompute(
             # METHOD.md). Left out of the *catalog* (no polygon), but recorded
             # here as "undetermined" so a crash-and-resume (see below) doesn't
             # redo the same expensive DEM search for it every time.
-            click.echo(f"undetermined {river.name or river.id}: no confident pour point", err=True)
+            click.echo(f"undetermined {river.name or river.id}: {undetermined_reason}", err=True)
             rivers_out[river.id] = {"source": "undetermined"}
             n_undetermined += 1
         else:
-            poly, diag = result
+            rings, diag = result
             area = diag["area_km2"]
             if not (area_min <= area <= area_max):
                 click.echo(
@@ -854,7 +981,6 @@ def valley_catchments_precompute(
                 rivers_out[river.id] = {"source": "discarded", "area_km2": round(area, 1)}
                 n_discarded += 1
             else:
-                rings = polygon_to_rings(poly)
                 if rings is None:
                     click.echo(
                         f"warning: {river.name or river.id}: empty polygon after simplify",
@@ -899,7 +1025,8 @@ def valley_catchments_precompute(
         f"{n_kept} kept, {n_skipped_wfs} skipped (WFS-covered), "
         f"{n_skipped_cached} skipped (already cached), "
         f"{n_discarded} discarded (out of area range), "
-        f"{n_undetermined} undetermined (no confident pour point), {n_failed} failed",
+        f"{n_undetermined} undetermined (no confident pour point), "
+        f"{n_failed} failed, {n_crashed} crashed (subprocess died - retried next run)",
         err=True,
     )
     n_dem = sum(1 for v in rivers_out.values() if v.get("source") == "dem")
