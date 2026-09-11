@@ -426,6 +426,81 @@ def test_geo_line_pieces_share_endpoints(branchy_rn):
             assert tuple(sub[0]) in ends and tuple(sub[-1]) in ends
 
 
+def _valley_sized_bassins() -> gpd.GeoDataFrame:
+    """One sub-basin per ``cours_d_eau`` in ``branchy_rn``, sized in real km².
+
+    Squares in degrees near this fixture's own coordinates (lon ~0, lat
+    ~42.8-42.9), scaled so the reprojected area lands where intended:
+    ``CDE_A``/``CDE_AUP`` together read as one ~50 km² valley (inside the
+    5-150 km² range a catchment mask is worth drawing for); ``CDE_STEM`` on
+    its own is a tiny sliver (too small); the whole tree's total (via
+    upstream_rivers from the root) comfortably exceeds 150 km² (too big).
+    """
+    from shapely.geometry import Polygon
+
+    def square(cx: float, cy: float, side_deg: float) -> Polygon:
+        h = side_deg / 2
+        return Polygon(
+            [(cx - h, cy - h), (cx + h, cy - h), (cx + h, cy + h), (cx - h, cy + h)]
+        )
+
+    # ~0.0744 deg side ~= 50 km^2 near lat 42.85 (see watershed tests for the
+    # same idea at unit scale); split across A + AUP so their union lands there.
+    rows = [
+        ("CDE_A", square(-0.045, 42.91, 0.06)),
+        ("CDE_AUP", square(-0.07, 42.93, 0.05)),
+        ("CDE_B", square(-0.03, 42.865, 0.02)),  # tiny on its own
+        ("CDE_C", square(-0.02, 42.845, 0.02)),
+        ("CDE_D", square(0.02, 42.845, 0.02)),
+        ("CDE_STEM2", square(0.03, 42.845, 0.02)),
+        # CDE_STEM itself: a big square so the whole-tree union is way over
+        # the valley range (this is the root; too big for a mask).
+        ("CDE_STEM", square(0.0, 42.7, 1.5)),
+    ]
+    return gpd.GeoDataFrame(
+        {
+            "liens_vers_cours_d_eau_principal": [r[0] for r in rows],
+            "geometry": [r[1] for r in rows],
+        },
+        crs="EPSG:4326",
+    )
+
+
+def test_valley_sized_river_gets_a_catchment_mask_polygon(branchy_rn):
+    cat = build_catalog(
+        branchy_rn, "CDE_STEM", bassins=_valley_sized_bassins(), geo=True
+    )
+    geo = cat["geo"]
+
+    # find CDE_A's node to confirm it landed in the valley-size range
+    a_node = next(n for n in walk(cat["root"]) if n["id"] == "CDE_A")
+    assert a_node["area_km2"] is not None
+    from valleespyr.catalog import _VALLEY_AREA_MAX_KM2, _VALLEY_AREA_MIN_KM2
+
+    assert _VALLEY_AREA_MIN_KM2 <= a_node["area_km2"] <= _VALLEY_AREA_MAX_KM2
+
+    catchment = geo["rivers"]["CDE_A"]["catchment"]
+    assert catchment, "expected a catchment ring for a valley-sized river"
+    for ring in catchment:
+        assert len(ring) >= 4
+        assert all(len(pt) == 2 for pt in ring)
+
+
+def test_too_big_or_uncovered_rivers_have_no_catchment_mask(branchy_rn):
+    cat = build_catalog(
+        branchy_rn, "CDE_STEM", bassins=_valley_sized_bassins(), geo=True
+    )
+    geo = cat["geo"]
+    # the root's own catchment is the whole tree's union -- way over the range
+    root_id = cat["root"]["id"]
+    assert geo["rivers"][root_id]["catchment"] is None
+
+
+def test_no_bassins_means_no_catchment_mask(branchy_rn):
+    geo = build_catalog(branchy_rn, "CDE_STEM", geo=True)["geo"]
+    assert all(g["catchment"] is None for g in geo["rivers"].values())
+
+
 def test_geo_html_gets_a_map(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM", geo=True)
     doc = catalog_to_html(cat)
@@ -452,6 +527,16 @@ def test_map_line_width_scales_with_strahler_order(branchy_rn):
     assert "mapWidth((node[id] || {}).strahler)" in doc
     assert "mapWidth((node[uid] || {}).strahler, 1.25)" in doc
     assert "mapWidth((node[id] || {}).strahler, 1.7)" in doc
+
+
+def test_map_ships_the_valley_mask_function(branchy_rn):
+    """The client ships paintMask(id): draws a world-covering polygon with the
+    river's own catchment ring cut out as a hole (even-odd fill), so a
+    valley-sized selection dims everything outside it."""
+    doc = catalog_to_html(build_catalog(branchy_rn, "CDE_STEM", geo=True))
+    assert "function paintMask(id)" in doc
+    assert "fillRule: 'evenodd'" in doc
+    assert "paintMask(id);" in doc  # called from paintMap on every selection
 
 
 # ------------------------------------------------------------------ offline sample

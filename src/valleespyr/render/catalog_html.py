@@ -658,7 +658,12 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
 
     ignPlan.addTo(map);
 
-    // river network panes, drawn above the basemap
+    // river network panes, drawn above the basemap; the valley mask sits
+    // between the basemap and the river lines, so a masked selection still
+    // shows its highlighted network crisply on top of the dimmed backdrop.
+    const maskPane = map.createPane('valleyMask');
+    maskPane.style.zIndex = 350;  // above tiles (200), below overlayPane (400)
+    let maskLayer = null;
     const ctxPane = L.featureGroup().addTo(map);
     const hiPane = L.featureGroup().addTo(map);
 
@@ -688,6 +693,25 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       return pts.length ? L.latLngBounds(pts) : null;
     }
 
+    // A river whose own catchment reads as "one valley" (see _VALLEY_AREA_*
+    // in catalog.py) ships a `catchment` ring: draw everything outside it
+    // dimmed, so that valley reads as its own bounded world rather than a
+    // flat, undifferentiated stretch of the bird's-eye basemap. A river
+    // outside that size range has no ring — falls back to the plain
+    // full-catchment-context view, no mask.
+    const WORLD_RING = [[-89, -180], [-89, 180], [89, 180], [89, -180]];
+    function paintMask(id) {
+      if (maskLayer) { map.removeLayer(maskLayer); maskLayer = null; }
+      const catchment = (geo.rivers[id] || {}).catchment;
+      if (!catchment || !catchment.length) return;
+      const holes = catchment.map(ring => ring.map(([lon, lat]) => [lat, lon]));
+      maskLayer = L.polygon([WORLD_RING, ...holes], {
+        pane: 'valleyMask', stroke: true, color: '#2f6f4f', weight: 1.5,
+        opacity: 0.6, fill: true, fillColor: '#1b2226', fillOpacity: 0.45,
+        fillRule: 'evenodd', interactive: false,
+      }).addTo(map);
+    }
+
     // paint the map for a selection; the graph refold is driven separately
     // by the outer focusOn(), which calls this.
     function paintMap(id) {
@@ -695,6 +719,7 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       if (!g) return;
       currentId = id;
       hiPane.clearLayers();
+      paintMask(id);
       for (const uid of up[id] || []) {
         const ug = geo.rivers[uid];
         if (!ug) continue;
@@ -735,7 +760,9 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
         '</b><a href="#" id="mapreset">⤢ whole catchment</a></div>' +
         '<div class="stats">' + statsHtml + '</div>' + alsoHtml;
       document.getElementById('mapreset').addEventListener('click', ev => {
-        ev.preventDefault(); map.flyToBounds(bounds, { padding: [14, 14], duration: 0.4 });
+        ev.preventDefault();
+        if (maskLayer) { map.removeLayer(maskLayer); maskLayer = null; }
+        map.flyToBounds(bounds, { padding: [14, 14], duration: 0.4 });
       });
       syncSelectedRow();
     }

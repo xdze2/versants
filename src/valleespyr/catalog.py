@@ -36,8 +36,11 @@ that want one; the bundled HTML renderer ignores the icon.
 With ``geo=True`` the catalog also gets a flat ``geo`` block: the catchment
 bbox plus, per river id, its own tronçon centreline as one or more simplified
 ``[lon, lat]`` sub-lines and its outlet coordinate. That is what the HTML
-renderer's mini-map draws — the whole catchment faint, the selected river and
-its upstream network picked out on top, projected client-side, no tiles.
+renderer's Leaflet map draws — the whole catchment faint, the selected river
+and its upstream network picked out on top. With ``bassins`` also given, a
+river whose drainage area reads as "one valley" (roughly 5-150 km²) additionally
+gets its own catchment boundary, so the map can mask everything outside it —
+each valley shown as its own bounded world rather than a flat bird's-eye plane.
 
 Pure graph + shapely. ``bassins`` is a :class:`geopandas.GeoDataFrame` (loaded
 by :func:`valleespyr.watershed.load_bassins`); without it ``area_km2`` / ``icon``
@@ -78,6 +81,15 @@ _ICON_DECIMALS = 1
 # ~600px mini-map without bloating the JSON.
 _GEO_MAX_VERTICES = 40
 _GEO_DECIMALS = 5
+
+# A river's own catchment boundary (for masking the map to "just this valley")
+# is only worth shipping for a river that reads as one valley on a map: big
+# enough that the shape means something, small enough that the mask isn't the
+# whole page. Outside this area range the map falls back to the full-catchment
+# context view with no mask.
+_VALLEY_AREA_MIN_KM2 = 5.0
+_VALLEY_AREA_MAX_KM2 = 150.0
+_CATCHMENT_MAX_VERTICES = 60
 
 
 def build_catalog(
@@ -196,15 +208,17 @@ def build_catalog(
         },
     }
     if geo:
-        out["geo"] = _build_geo(rn, tree)
+        out["geo"] = _build_geo(rn, tree, bassins=bassins)
     return out
 
 
 # ------------------------------------------------------------------- map geometry
 
 
-def _build_geo(rn: RiverNetwork, tree: dict[str, Any]) -> dict[str, Any]:
-    """``{"bbox": [w, s, e, n], "rivers": {id: {"line", "outlet"}}}`` for a tree.
+def _build_geo(
+    rn: RiverNetwork, tree: dict[str, Any], *, bassins: gpd.GeoDataFrame | None = None
+) -> dict[str, Any]:
+    """``{"bbox": [w, s, e, n], "rivers": {id: {"line", "outlet", "catchment"}}}``.
 
     One entry per river node in ``tree``. ``line`` is the river's own tronçon
     centreline as a list of simplified sub-lines (``[[[lon, lat], …], …]``) —
@@ -212,6 +226,13 @@ def _build_geo(rn: RiverNetwork, tree: dict[str, Any]) -> dict[str, Any]:
     braided reach or a node where three same-river reaches meet yields several,
     which drawn together still read as one river. ``outlet`` is the river's
     mouth coordinate. ``bbox`` spans every sub-line and every outlet.
+
+    With ``bassins`` given, a river whose drainage area falls in the "reads as
+    one valley" range (see ``_VALLEY_AREA_MIN_KM2`` / ``_MAX_KM2``) also gets
+    ``catchment``: its own catchment boundary as one or more simplified
+    ``[lon, lat]`` rings, for the HTML renderer to mask the map down to just
+    that valley. Rivers outside the range get ``catchment: None`` — too big
+    (the mask would cover the whole map) or too small (not worth a polygon).
     """
     from valleespyr.valley import outlet_point
 
@@ -238,7 +259,13 @@ def _build_geo(rn: RiverNetwork, tree: dict[str, Any]) -> dict[str, Any]:
         except Exception:  # pragma: no cover - outlet geometry hiccup
             logger.debug("geo outlet failed for %s", rid, exc_info=True)
             outlet = parts[-1][-1]
-        rivers[rid] = {"line": parts, "outlet": outlet}
+        catchment = None
+        area = node.get("area_km2")
+        if bassins is not None and area is not None and (
+            _VALLEY_AREA_MIN_KM2 <= area <= _VALLEY_AREA_MAX_KM2
+        ):
+            catchment = _valley_catchment(rn, rid, bassins)
+        rivers[rid] = {"line": parts, "outlet": outlet, "catchment": catchment}
         for part in parts:
             for lon, lat in part:
                 note(lon, lat)
@@ -246,6 +273,49 @@ def _build_geo(rn: RiverNetwork, tree: dict[str, Any]) -> dict[str, Any]:
 
     bbox = [w, s, e, n] if w is not None else None
     return {"bbox": bbox, "rivers": rivers}
+
+
+def _valley_catchment(
+    rn: RiverNetwork, river_id: str, bassins: gpd.GeoDataFrame
+) -> list[list[list[float]]] | None:
+    """A river's own catchment boundary in lon/lat, simplified for the map mask.
+
+    Unlike :func:`_icon_for_river` (which normalises into a little glyph), this
+    keeps real coordinates: one ring per polygon part (a catchment is usually
+    one piece, but ``unary_union`` can yield a ``MultiPolygon`` at a bifurcation).
+    Each ring is Douglas-Peucker-simplified toward ``_CATCHMENT_MAX_VERTICES``,
+    the same recipe :func:`_river_lines` uses for centrelines.
+    """
+    from valleespyr.watershed import catchment_polygon
+
+    river = rn.get(river_id)
+    if river is None:
+        return None
+    ids = {river.id} | {r.id for r in rn.upstream_rivers(river.id)}
+    poly = catchment_polygon(bassins, ids)
+    if poly is None:
+        return None
+
+    parts = poly.geoms if poly.geom_type == "MultiPolygon" else [poly]
+    out: list[list[list[float]]] = []
+    for part in parts:
+        ring = part.exterior
+        if ring is None or ring.is_empty:
+            continue
+        simple = ring
+        tol = 1e-4  # ~10 m, same starting tolerance as _river_lines
+        for _ in range(12):
+            if len(simple.coords) <= _CATCHMENT_MAX_VERTICES:
+                break
+            simple = ring.simplify(tol, preserve_topology=True)
+            tol *= 1.8
+            if simple.is_empty or len(simple.coords) < 4:
+                simple = ring
+                break
+        out.append(
+            [[round(x, _GEO_DECIMALS), round(y, _GEO_DECIMALS)] for x, y in simple.coords]
+        )
+    return out or None
 
 
 def _walk_tree(node: dict[str, Any]):
