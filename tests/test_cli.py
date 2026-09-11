@@ -202,7 +202,12 @@ def test_precompute_discards_out_of_range_area(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(out.read_text("utf-8"))
-    assert set(payload["rivers"]) == {"CDE_MAIN"}
+    # CDE_TRIB is recorded too (so a resume doesn't redo the DEM search for
+    # it), but with no "catchment" - only CDE_MAIN got a real polygon.
+    assert set(payload["rivers"]) == {"CDE_MAIN", "CDE_TRIB"}
+    assert payload["rivers"]["CDE_MAIN"]["source"] == "dem"
+    assert payload["rivers"]["CDE_TRIB"]["source"] == "discarded"
+    assert "catchment" not in payload["rivers"]["CDE_TRIB"]
     assert "discarding" in result.output
 
 
@@ -233,7 +238,9 @@ def test_precompute_respects_custom_area_bounds(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.output
     payload = json.loads(out.read_text("utf-8"))
     # only CDE_MAIN (60 km²) now qualifies; CDE_TRIB (8 km²) is below --area-min
-    assert set(payload["rivers"]) == {"CDE_MAIN"}
+    # but is still recorded (as "discarded", no catchment) so a resume skips it.
+    assert set(payload["rivers"]) == {"CDE_MAIN", "CDE_TRIB"}
+    assert payload["rivers"]["CDE_TRIB"]["source"] == "discarded"
 
 
 def test_precompute_is_incremental(tmp_path: Path, monkeypatch):

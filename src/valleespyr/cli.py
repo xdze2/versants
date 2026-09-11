@@ -713,10 +713,11 @@ def valley_catchments_precompute(
     METHOD.md) and keeps the result only if the *measured* area falls in
     ``[--area-min, --area-max]`` — the same "reads as one valley" range
     ``valleespyr catalog`` uses. A river whose search finds no confident pour
-    point (``course_inside_frac`` never clears 0.9) is counted separately as
-    "undetermined" and left out of the output rather than cached wrong. Load
-    the output's ``"rivers"`` dict and pass it as
-    ``build_catalog(..., dem_catchments=...)`` to use it.
+    point (``course_inside_frac`` never clears 0.9) is recorded separately as
+    "undetermined" and never gets a polygon in the catalog. Load the output's
+    ``"rivers"`` dict and pass it as ``build_catalog(..., dem_catchments=...)``
+    to use it — an entry without ``"source": "dem"`` (discarded/undetermined)
+    has no ``"catchment"`` key and is ignored there.
 
     Needs the ``dem`` extra installed. With the default ``--dem-source s3``
     (public, unauthenticated Copernicus tiles) no API key or quota applies.
@@ -725,9 +726,14 @@ def valley_catchments_precompute(
     downloads/24h; hitting that quota stops the batch early (after writing out
     everything collected so far) rather than crashing.
 
-    Safe to re-run either way: already-cached rivers (successes only) are
-    skipped, so an interrupted run can be resumed, and a river that failed or
-    fell outside the area range is retried next time.
+    Safe to re-run: every river with a *deterministic* outcome for these
+    inputs — kept, discarded (outside the area range) or undetermined (no
+    confident pour point) — is recorded in ``--out`` and skipped on the next
+    run, so an interrupted run (including pysheds' occasional unrecoverable
+    native crash on a sparse tile, see METHOD.md) resumes without redoing that
+    work. Only a transient failure (a download hiccup, an unexpected
+    exception) is retried next time; to force a full re-run after changing
+    ``--area-min``/``--area-max``, delete ``--out`` first.
 
     ROOT_QUERY is a river name (case-insensitive substring) or a ``COURDEAU…``
     id, resolved the same way as the other ``valley`` commands.
@@ -830,49 +836,60 @@ def valley_catchments_precompute(
         if result is None:
             # No candidate pour point reached course_inside_frac >= 0.9 - a
             # confluence too ambiguous for this DEM to resolve (see
-            # METHOD.md). Left out rather than cached wrong.
+            # METHOD.md). Left out of the *catalog* (no polygon), but recorded
+            # here as "undetermined" so a crash-and-resume (see below) doesn't
+            # redo the same expensive DEM search for it every time.
             click.echo(f"undetermined {river.name or river.id}: no confident pour point", err=True)
+            rivers_out[river.id] = {"source": "undetermined"}
             n_undetermined += 1
-            continue
-        poly, diag = result
+        else:
+            poly, diag = result
+            area = diag["area_km2"]
+            if not (area_min <= area <= area_max):
+                click.echo(
+                    f"discarding {river.name or river.id}: {area:.1f} km² outside "
+                    f"[{area_min}, {area_max}]",
+                    err=True,
+                )
+                rivers_out[river.id] = {"source": "discarded", "area_km2": round(area, 1)}
+                n_discarded += 1
+            else:
+                rings = polygon_to_rings(poly)
+                if rings is None:
+                    click.echo(
+                        f"warning: {river.name or river.id}: empty polygon after simplify",
+                        err=True,
+                    )
+                    n_failed += 1
+                    continue
 
-        area = diag["area_km2"]
-        if not (area_min <= area <= area_max):
-            click.echo(
-                f"discarding {river.name or river.id}: {area:.1f} km² outside "
-                f"[{area_min}, {area_max}]",
-                err=True,
-            )
-            n_discarded += 1
-            continue
+                rivers_out[river.id] = {
+                    "catchment": rings,
+                    "area_km2": round(area, 1),
+                    "source": "dem",
+                    "outlet_lonlat": list(diag["outlet_lonlat"]),
+                    "snap_moved_cells": diag["snap_moved_cells"],
+                    "offset_m": diag["offset_m"],
+                    "acc_channel_cells": diag["acc_channel_cells"],
+                    "course_inside_frac": round(diag["course_inside_frac"], 3),
+                }
+                n_kept += 1
+                click.echo(
+                    f"kept {river.name or river.id}: {area:.1f} km² "
+                    f"(offset {diag['offset_m']:.0f}m, inside {diag['course_inside_frac']:.0%})",
+                    err=True,
+                )
 
-        rings = polygon_to_rings(poly)
-        if rings is None:
-            click.echo(f"warning: {river.name or river.id}: empty polygon after simplify", err=True)
-            n_failed += 1
-            continue
-
-        rivers_out[river.id] = {
-            "catchment": rings,
-            "area_km2": round(area, 1),
-            "source": "dem",
-            "outlet_lonlat": list(diag["outlet_lonlat"]),
-            "snap_moved_cells": diag["snap_moved_cells"],
-            "offset_m": diag["offset_m"],
-            "acc_channel_cells": diag["acc_channel_cells"],
-            "course_inside_frac": round(diag["course_inside_frac"], 3),
-        }
-        n_kept += 1
-        click.echo(
-            f"kept {river.name or river.id}: {area:.1f} km² "
-            f"(offset {diag['offset_m']:.0f}m, inside {diag['course_inside_frac']:.0%})",
-            err=True,
-        )
-        # write after every kept river, not just at the end: a batch this size
-        # runs long enough to hit an unrecoverable native crash (GDAL/rasterio
-        # memory corruption, a killed process, ...) that no Python except can
-        # catch — saving incrementally means a crash loses at most the one
-        # river in flight, not the whole run since the last save.
+        # Write out after every resolved river, not just at the end: a batch
+        # this size runs long enough to hit an unrecoverable native crash
+        # (GDAL/rasterio memory corruption, a killed process, ...) that no
+        # Python except can catch. Every resolved river (kept, discarded or
+        # undetermined — anything with a deterministic outcome for these
+        # inputs) is recorded in rivers_out as it's decided and saved
+        # immediately, so a crash loses at most the one river in flight, not
+        # the whole run since the last save — including a long run of
+        # small-headwater discards, which used to get redone from scratch on
+        # every resume.
         _write_out()
 
     _write_out()
@@ -885,7 +902,12 @@ def valley_catchments_precompute(
         f"{n_undetermined} undetermined (no confident pour point), {n_failed} failed",
         err=True,
     )
-    click.echo(f"wrote {out_file} ({len(rivers_out)} total cached river(s))", err=True)
+    n_dem = sum(1 for v in rivers_out.values() if v.get("source") == "dem")
+    click.echo(
+        f"wrote {out_file} ({n_dem} river(s) with a DEM catchment, "
+        f"{len(rivers_out)} total resolved (incl. discarded/undetermined))",
+        err=True,
+    )
     if stopped_early:
         click.echo(f"stopped early: {stopped_early}", err=True)
 
