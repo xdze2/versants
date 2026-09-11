@@ -1183,6 +1183,14 @@ def valley_plate(
     "valley where a sub-basin covers it.",
 )
 @click.option(
+    "--dem-catchments",
+    "dem_catchments_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=None,
+    help="Output of `valley catchments precompute` (data/processed/catchments.json) — "
+    "fills the map mask (--geo) for rivers --bassins doesn't cover.",
+)
+@click.option(
     "--max-depth",
     type=int,
     default=None,
@@ -1217,6 +1225,7 @@ def catalog_cmd(
     from_file: str | None,
     bbox_s: str | None,
     bassins_path: str | None,
+    dem_catchments_path: str | None,
     max_depth: int | None,
     no_orient_outlet_down: bool,
     geo: bool,
@@ -1231,7 +1240,9 @@ def catalog_cmd(
     Strahler order, valleys upstream and a study-local Pfafstetter code, and —
     with ``--bassins`` — a drainage ``area_km2``. ``--html`` renders it as a
     static git-graph: one lane per river, tinted by Strahler order; add
-    ``--geo`` and each row also draws the selected river's network on a map.
+    ``--geo`` and each row also draws the selected river's network on a map,
+    masked to the river's own catchment where ``--bassins`` (or
+    ``--dem-catchments`` filling the gap) has one.
     """
     from .catalog import build_catalog
     from .render.catalog_html import render_catalog_html
@@ -1244,11 +1255,18 @@ def catalog_cmd(
 
         bassins = load_bassins(bassins_path)
 
+    dem_catchments = None
+    if dem_catchments_path:
+        from pathlib import Path
+
+        dem_catchments = json.loads(Path(dem_catchments_path).read_text("utf-8")).get("rivers", {})
+
     try:
         catalog = build_catalog(
             rn,
             root_query,
             bassins=bassins,
+            dem_catchments=dem_catchments,
             max_depth=max_depth,
             orient_outlet_down=not no_orient_outlet_down,
             geo=geo,

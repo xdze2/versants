@@ -17,6 +17,7 @@
 
 TRONCONS ?= data/raw/troncon_hydrographique_pyrenees.parquet
 BASSINS  ?= data/raw/bassin_versant_topographique_pyrenees.parquet
+DEM_CATCHMENTS ?= data/processed/catchments.json
 
 # la Garonne — resolved to its stable cours_d_eau id so `make site` never trips
 # over the "2 rivers match 'la Garonne'" ambiguity.
@@ -30,6 +31,10 @@ CATALOG  := data/processed/garonne_catalog.json
 site: $(PAGE)
 
 # Regenerate whenever the source dump, the generator, or the renderer changes.
+# DEM_CATCHMENTS is intentionally not a prerequisite: it may not exist yet
+# (make site still works without it, see the --dem-catchments guard above)
+# and it's produced by a separate, slow batch (valley catchments precompute),
+# not something a plain `make site` should trigger.
 $(PAGE): $(TRONCONS) $(BASSINS) \
          src/valleespyr/catalog.py src/valleespyr/render/catalog_html.py
 	@test -f "$(TRONCONS)" || { \
@@ -38,6 +43,7 @@ $(PAGE): $(TRONCONS) $(BASSINS) \
 	uv run valleespyr catalog $(ROOT) \
 	  --from-file "$(TRONCONS)" \
 	  $(if $(wildcard $(BASSINS)),--bassins "$(BASSINS)",) \
+	  $(if $(wildcard $(DEM_CATCHMENTS)),--dem-catchments "$(DEM_CATCHMENTS)",) \
 	  --geo \
 	  -o "$(CATALOG)" \
 	  --html "$(PAGE)"

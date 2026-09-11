@@ -707,7 +707,7 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       const holes = catchment.map(ring => ring.map(([lon, lat]) => [lat, lon]));
       maskLayer = L.polygon([WORLD_RING, ...holes], {
         pane: 'valleyMask', stroke: true, color: '#2f6f4f', weight: 1.5,
-        opacity: 0.6, fill: true, fillColor: '#1b2226', fillOpacity: 0.45,
+        opacity: 0.6, fill: true, fillColor: '#ffffff', fillOpacity: 0.75,
         fillRule: 'evenodd', interactive: false,
       }).addTo(map);
     }

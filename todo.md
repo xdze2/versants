@@ -96,11 +96,18 @@ so a valley-sized selection reads as its own bounded world, dimmed everywhere
 outside it, while the git-graph list stays compact (per-row length/order/
 area/etc. stats moved into an info box below the map, room to add more later).
 
-**Not done yet**: `data/processed/catchments.json` is computed but not wired
-into `docs/index.html` — `catalog_cmd` (the `valleespyr catalog` CLI command)
-has no `--dem-catchments` flag yet, so `make site` still builds without the
-DEM fallback. Small addition when wanted: load the JSON's `rivers` dict, pass
-as `build_catalog(..., dem_catchments=...)`.
+**Wired in (2026-09-11, same session):** `catalog_cmd` gained `--dem-catchments
+<path>`, loading the precompute output's `rivers` dict and passing it straight
+through to `build_catalog(..., dem_catchments=...)` (already supported it).
+`Makefile` picks it up automatically via `DEM_CATCHMENTS ?=
+data/processed/catchments.json` guarded by `$(wildcard ...)` — same pattern as
+`--bassins` — so `make site` uses it when present, still builds without it
+when absent, and it's deliberately *not* a `$(PAGE)` prerequisite (it comes
+from a separate slow batch, not something a plain `make site` should
+trigger). Ran `make -B site` end to end against the real Garonne tree: all 50
+cached DEM catchments (incl. **Neste de Rioumajou**, the original
+border-straddling motivating case) made it into `docs/index.html`'s embedded
+catalog JSON, 3 more from WFS, 124 tests still pass.
 
 ## DONE — the Lutour demo works (2026-09-10)
 
@@ -139,12 +146,14 @@ Gotchas found:
 
 1. ~~Then promote to `src/valleespyr/hydro/dem.py`~~ — **done, see the
    2026-09-11 entry above.**
-2. Still open: run the pipeline specifically on **Neste de Rioumajou** — the
-   border-straddling case the whole exercise is for. COP30 covers Spain; the
-   outlet coord comes from the tronçon dump the same way. No reference polygon
-   exists, so the check is "plausible area + contains its own streams". The
-   2026-09-11 batch run covered the whole Garonne tree generically but this
-   specific named case was never singled out and checked.
+2. **Neste de Rioumajou** — the border-straddling case the whole exercise is
+   for. Confirmed present with a DEM catchment in the 2026-09-11 batch
+   (`COURDEAU0000002000907013`, area in the "one valley" range) and now
+   visible in the published `docs/index.html` after the `--dem-catchments`
+   wiring above. Not yet eyeballed on the actual map for "contains its own
+   streams + follows ridgelines, not the political border" — worth a quick
+   visual check since no reference polygon exists to check against
+   automatically.
 
 ## Why (measured, not assumed)
 
@@ -262,12 +271,11 @@ Alternatives if pysheds disappoints: `richdem` (faster on big grids),
 - ~~Promote to `src/valleespyr/hydro/dem.py`~~ — **done (2026-09-11)**:
   `fetch_dem`/`fetch_dem_s3`, `condition`/`trace`/`delineate`, tile caching.
 - ~~Wire into the app: when a river has no `bassin_versant_topographique`
-  polygon, offer "compute catchment from DEM"~~ — **done for the catalog map**
-  (2026-09-11): `valley catchments precompute` + `build_catalog(...,
-  dem_catchments=...)`, WFS wins where it exists. **Still open**: no
-  `--dem-catchments` flag on the `valleespyr catalog` CLI command yet, so
-  `make site` doesn't use the precomputed cache — see the 2026-09-11 entry's
-  "Not done yet" note.
+  polygon, offer "compute catchment from DEM"~~ — **done, including
+  `make site`** (2026-09-11): `valley catchments precompute` +
+  `build_catalog(..., dem_catchments=...)` + `catalog_cmd --dem-catchments` +
+  `Makefile`'s `DEM_CATCHMENTS`, WFS wins where it exists, DEM fills the rest.
+  Published `docs/index.html` now carries all 50 precomputed DEM catchments.
 - Real area/elevation stats per catchment (hypsometry, min/max/mean elevation) —
   this is what the 3D maps actually want. Still open; `trace()`'s diagnostics
   don't compute this yet, only area.
