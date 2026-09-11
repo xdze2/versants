@@ -41,6 +41,10 @@ and its upstream network picked out on top. With ``bassins`` also given, a
 river whose drainage area reads as "one valley" (roughly 5-150 km²) additionally
 gets its own catchment boundary, so the map can mask everything outside it —
 each valley shown as its own bounded world rather than a flat bird's-eye plane.
+The WFS dump only covers a fraction of rivers; an optional ``dem_catchments``
+(a precomputed batch of DEM-delineated polygons, see
+``valleespyr valley catchments precompute``) fills the gap for a valley-sized
+river the WFS misses, without ever overriding a WFS hit.
 
 Pure graph + shapely. ``bassins`` is a :class:`geopandas.GeoDataFrame` (loaded
 by :func:`valleespyr.watershed.load_bassins`); without it ``area_km2`` / ``icon``
@@ -100,6 +104,7 @@ def build_catalog(
     max_depth: int | None = None,
     orient_outlet_down: bool = True,
     geo: bool = False,
+    dem_catchments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the nested-dict catalog rooted at ``root_query``.
 
@@ -127,6 +132,12 @@ def build_catalog(
     as one or more simplified sub-lines (split only across a lake / missing
     reach). The HTML renderer draws the whole catchment faint and picks the
     selected river plus its upstream network out on top.
+
+    ``dem_catchments`` (optional) is the already-loaded ``"rivers"`` sub-dict of
+    a ``valleespyr valley catchments precompute`` output — a DEM-derived
+    fallback for a valley-sized river the ``bassins`` WFS dump doesn't cover.
+    See :func:`_build_geo` for the precedence. ``build_catalog`` stays IO-free:
+    the caller loads the JSON, same as it already loads ``bassins``.
 
     Returns a dict with ``root`` (the tree), ``meta`` (counts, the root id,
     whether icons were generated) and — with ``geo=True`` — ``geo``.
@@ -208,7 +219,7 @@ def build_catalog(
         },
     }
     if geo:
-        out["geo"] = _build_geo(rn, tree, bassins=bassins)
+        out["geo"] = _build_geo(rn, tree, bassins=bassins, dem_catchments=dem_catchments)
     return out
 
 
@@ -216,7 +227,11 @@ def build_catalog(
 
 
 def _build_geo(
-    rn: RiverNetwork, tree: dict[str, Any], *, bassins: gpd.GeoDataFrame | None = None
+    rn: RiverNetwork,
+    tree: dict[str, Any],
+    *,
+    bassins: gpd.GeoDataFrame | None = None,
+    dem_catchments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``{"bbox": [w, s, e, n], "rivers": {id: {"line", "outlet", "catchment"}}}``.
 
@@ -233,6 +248,12 @@ def _build_geo(
     ``[lon, lat]`` rings, for the HTML renderer to mask the map down to just
     that valley. Rivers outside the range get ``catchment: None`` — too big
     (the mask would cover the whole map) or too small (not worth a polygon).
+
+    Resolution order per river: the WFS-derived polygon (:func:`_valley_catchment`)
+    wins when present (authoritative, already simplified); when it is ``None``
+    (no WFS coverage) and ``dem_catchments`` has an entry for this river id, that
+    DEM-derived polygon fills the gap; otherwise ``catchment`` stays ``None``,
+    same as today.
     """
     from valleespyr.valley import outlet_point
 
@@ -265,6 +286,10 @@ def _build_geo(
             _VALLEY_AREA_MIN_KM2 <= area <= _VALLEY_AREA_MAX_KM2
         ):
             catchment = _valley_catchment(rn, rid, bassins)
+        if catchment is None and dem_catchments is not None:
+            entry = dem_catchments.get(rid)
+            if entry is not None:
+                catchment = entry.get("catchment")
         rivers[rid] = {"line": parts, "outlet": outlet, "catchment": catchment}
         for part in parts:
             for lon, lat in part:
@@ -275,27 +300,21 @@ def _build_geo(
     return {"bbox": bbox, "rivers": rivers}
 
 
-def _valley_catchment(
-    rn: RiverNetwork, river_id: str, bassins: gpd.GeoDataFrame
+def polygon_to_rings(
+    poly, *, max_vertices: int = _CATCHMENT_MAX_VERTICES, decimals: int = _GEO_DECIMALS
 ) -> list[list[list[float]]] | None:
-    """A river's own catchment boundary in lon/lat, simplified for the map mask.
+    """A shapely polygon's exterior ring(s) as simplified ``[lon, lat]`` rings.
 
-    Unlike :func:`_icon_for_river` (which normalises into a little glyph), this
-    keeps real coordinates: one ring per polygon part (a catchment is usually
-    one piece, but ``unary_union`` can yield a ``MultiPolygon`` at a bifurcation).
-    Each ring is Douglas-Peucker-simplified toward ``_CATCHMENT_MAX_VERTICES``,
-    the same recipe :func:`_river_lines` uses for centrelines.
+    One ring per polygon part (usually one piece, but ``unary_union`` /
+    DEM vectorisation can yield a ``MultiPolygon``). Each ring is
+    Douglas-Peucker-simplified toward ``max_vertices``, the same recipe
+    :func:`_river_lines` uses for centrelines. Shared by :func:`_valley_catchment`
+    (WFS-derived polygons) and the ``valley catchments precompute`` CLI command
+    (DEM-derived polygons), so both produce the same ``list[list[list[float]]]``
+    ring shape for the catalog's ``geo.rivers[id].catchment``.
     """
-    from valleespyr.watershed import catchment_polygon
-
-    river = rn.get(river_id)
-    if river is None:
-        return None
-    ids = {river.id} | {r.id for r in rn.upstream_rivers(river.id)}
-    poly = catchment_polygon(bassins, ids)
     if poly is None:
         return None
-
     parts = poly.geoms if poly.geom_type == "MultiPolygon" else [poly]
     out: list[list[list[float]]] = []
     for part in parts:
@@ -305,17 +324,34 @@ def _valley_catchment(
         simple = ring
         tol = 1e-4  # ~10 m, same starting tolerance as _river_lines
         for _ in range(12):
-            if len(simple.coords) <= _CATCHMENT_MAX_VERTICES:
+            if len(simple.coords) <= max_vertices:
                 break
             simple = ring.simplify(tol, preserve_topology=True)
             tol *= 1.8
             if simple.is_empty or len(simple.coords) < 4:
                 simple = ring
                 break
-        out.append(
-            [[round(x, _GEO_DECIMALS), round(y, _GEO_DECIMALS)] for x, y in simple.coords]
-        )
+        out.append([[round(x, decimals), round(y, decimals)] for x, y in simple.coords])
     return out or None
+
+
+def _valley_catchment(
+    rn: RiverNetwork, river_id: str, bassins: gpd.GeoDataFrame
+) -> list[list[list[float]]] | None:
+    """A river's own catchment boundary in lon/lat, simplified for the map mask.
+
+    Unlike :func:`_icon_for_river` (which normalises into a little glyph), this
+    keeps real coordinates. See :func:`polygon_to_rings` for the simplification
+    recipe.
+    """
+    from valleespyr.watershed import catchment_polygon
+
+    river = rn.get(river_id)
+    if river is None:
+        return None
+    ids = {river.id} | {r.id for r in rn.upstream_rivers(river.id)}
+    poly = catchment_polygon(bassins, ids)
+    return polygon_to_rings(poly)
 
 
 def _walk_tree(node: dict[str, Any]):
@@ -679,4 +715,4 @@ def _points_to_svg_path(pts, outlet_xy: tuple[float, float] | None = None) -> st
     return "".join(parts)
 
 
-__all__ = ["build_catalog"]
+__all__ = ["build_catalog", "polygon_to_rings"]

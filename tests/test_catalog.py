@@ -501,6 +501,68 @@ def test_no_bassins_means_no_catchment_mask(branchy_rn):
     assert all(g["catchment"] is None for g in geo["rivers"].values())
 
 
+def _dem_catchments_fixture() -> dict:
+    """A synthetic 'valley catchments precompute' rivers dict for CDE_B and CDE_A."""
+    return {
+        "CDE_B": {
+            "catchment": [[[-0.04, 42.86], [-0.02, 42.86], [-0.02, 42.87], [-0.04, 42.86]]],
+            "area_km2": 12.3,
+            "source": "dem",
+            "outlet_lonlat": [-0.03, 42.865],
+            "snap_moved_cells": 0.5,
+        },
+        "CDE_A": {
+            "catchment": [[[-1.0, 40.0], [-1.0, 40.1], [-0.9, 40.1], [-1.0, 40.0]]],
+            "area_km2": 999.0,
+            "source": "dem",
+            "outlet_lonlat": [-1.0, 40.0],
+            "snap_moved_cells": 0.1,
+        },
+    }
+
+
+def test_dem_catchment_fills_gap_with_no_wfs_coverage(branchy_rn):
+    """CDE_B has no sub-basin in a bassins frame that omits it; the DEM cache
+    entry should be used as a fallback for the map mask."""
+    bassins_no_b = _valley_sized_bassins()
+    bassins_no_b = bassins_no_b[bassins_no_b["liens_vers_cours_d_eau_principal"] != "CDE_B"]
+
+    cat = build_catalog(
+        branchy_rn,
+        "CDE_STEM",
+        bassins=bassins_no_b,
+        geo=True,
+        dem_catchments=_dem_catchments_fixture(),
+    )
+    b_node = next(n for n in walk(cat["root"]) if n["id"] == "CDE_B")
+    # no WFS coverage -> area_km2 stays None -> outside the valley-size gate,
+    # but the DEM fallback still applies since _build_geo checks dem_catchments
+    # whenever the WFS-derived catchment came back None.
+    assert b_node["area_km2"] is None
+    catchment = cat["geo"]["rivers"]["CDE_B"]["catchment"]
+    assert catchment == _dem_catchments_fixture()["CDE_B"]["catchment"]
+
+
+def test_wfs_catchment_wins_over_dem_cache_for_same_river(branchy_rn):
+    """CDE_A is covered by the WFS bassins fixture; even though a (deliberately
+    very different) dem_catchments entry also exists for CDE_A, the WFS-derived
+    polygon must be the one that wins."""
+    cat = build_catalog(
+        branchy_rn,
+        "CDE_STEM",
+        bassins=_valley_sized_bassins(),
+        geo=True,
+        dem_catchments=_dem_catchments_fixture(),
+    )
+    catchment = cat["geo"]["rivers"]["CDE_A"]["catchment"]
+    assert catchment is not None
+    assert catchment != _dem_catchments_fixture()["CDE_A"]["catchment"]
+    # sanity: the WFS-derived ring sits near this fixture's own coordinates
+    # (lon ~ -0.05..-0.09), not the DEM fixture's decoy coordinates (~ -1.0)
+    lons = [pt[0] for ring in catchment for pt in ring]
+    assert all(lon > -1.0 for lon in lons)
+
+
 def test_geo_html_gets_a_map(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM", geo=True)
     doc = catalog_to_html(cat)

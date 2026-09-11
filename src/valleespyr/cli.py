@@ -6,6 +6,7 @@ import json
 import sys
 
 import click
+import requests
 
 from . import watershed as ws
 from .dump import dump_layer
@@ -585,7 +586,8 @@ def valley_catchment(
     """Delineate one river's DEM catchment polygon and emit it as GeoJSON.
 
     QUERY is a river name (case-insensitive substring) or a ``COURDEAU…`` id.
-    Needs ``OPENTOPOGRAPHY_API_KEY`` set (the DEM tile is fetched live).
+    Needs an OpenTopography API key (``OPENTOPOGRAPHY_API_KEY`` or
+    ``key.secret``); the DEM tile is fetched live.
     """
     from pathlib import Path
 
@@ -623,6 +625,257 @@ def valley_catchment(
         },
     }
     _dump({"type": "FeatureCollection", "features": [feature]}, output)
+
+
+@valley.group("catchments")
+def valley_catchments() -> None:
+    """Batch operations over many rivers' catchments (see 'precompute')."""
+
+
+@valley_catchments.command("precompute")
+@click.argument("root_query")
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option(
+    "--bassins",
+    "bassins_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=None,
+    help="Local bassin_versant_topographique dump — any river it already covers "
+    "is skipped (WFS wins, DEM only fills gaps).",
+)
+@click.option(
+    "--dem-dir",
+    type=click.Path(file_okay=False),
+    default="data/raw/dem",
+    show_default=True,
+    help="Cache DEM tiles here.",
+)
+@click.option(
+    "--dem-source",
+    type=click.Choice(["s3", "opentopography"]),
+    default="s3",
+    show_default=True,
+    help="'s3': public, unauthenticated Copernicus GLO-30 tiles, no rate limit "
+    "(cached per 1x1 degree cell, shared across nearby rivers). "
+    "'opentopography': the REST API, needs a key and caps at 50 downloads/24h.",
+)
+@click.option("--demtype", default="COP30", show_default=True, help="OpenTopography DEM type.")
+@click.option(
+    "--acc-channel-cells",
+    type=int,
+    default=1000,
+    show_default=True,
+    help="Flow-accumulation threshold (cells) that defines a channel for the snap.",
+)
+@click.option(
+    "--area-min",
+    "area_min",
+    type=float,
+    default=None,
+    help="Discard a delineated catchment smaller than this (km²). "
+    "Default: catalog._VALLEY_AREA_MIN_KM2.",
+)
+@click.option(
+    "--area-max",
+    "area_max",
+    type=float,
+    default=None,
+    help="Discard a delineated catchment bigger than this (km²). "
+    "Default: catalog._VALLEY_AREA_MAX_KM2.",
+)
+@click.option(
+    "-o",
+    "--out",
+    "out_path",
+    type=click.Path(dir_okay=False),
+    default="data/processed/catchments.json",
+    show_default=True,
+    help="Output JSON (merged incrementally with whatever is already there).",
+)
+@click.pass_context
+def valley_catchments_precompute(
+    ctx: click.Context,
+    root_query: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    bassins_path: str | None,
+    dem_dir: str,
+    dem_source: str,
+    demtype: str,
+    acc_channel_cells: int,
+    area_min: float | None,
+    area_max: float | None,
+    out_path: str,
+) -> None:
+    """DEM-delineate a catchment for every river upstream of ROOT_QUERY, as a batch.
+
+    ``bassin_versant_topographique`` (the WFS watershed dump) only covers a small
+    fraction of named rivers, so the HTML catalog's per-valley map mask (see
+    ``valleespyr catalog --geo --bassins``) is blank for most of them. This
+    command fills that gap offline, ahead of time: for every river in
+    ROOT_QUERY's upstream network that isn't already covered by ``--bassins``
+    (when given) or already present in ``--out``, it delineates a catchment from
+    a Copernicus DEM (:func:`valleespyr.valley.delineate_river`) and keeps the
+    result only if the *measured* area falls in ``[--area-min, --area-max]`` —
+    the same "reads as one valley" range ``valleespyr catalog`` uses. Load the
+    output's ``"rivers"`` dict and pass it as ``build_catalog(..., dem_catchments=...)``
+    to use it.
+
+    Needs the ``dem`` extra installed. With the default ``--dem-source s3``
+    (public, unauthenticated Copernicus tiles) no API key or quota applies.
+    With ``--dem-source opentopography`` an API key is needed
+    (``OPENTOPOGRAPHY_API_KEY`` or ``key.secret``) and its free tier caps at 50
+    downloads/24h; hitting that quota stops the batch early (after writing out
+    everything collected so far) rather than crashing.
+
+    Safe to re-run either way: already-cached rivers (successes only) are
+    skipped, so an interrupted run can be resumed, and a river that failed or
+    fell outside the area range is retried next time.
+
+    ROOT_QUERY is a river name (case-insensitive substring) or a ``COURDEAU…``
+    id, resolved the same way as the other ``valley`` commands.
+    """
+    from pathlib import Path
+
+    from . import valley as valley_mod
+    from .catalog import _VALLEY_AREA_MAX_KM2, _VALLEY_AREA_MIN_KM2, polygon_to_rings
+
+    area_min = _VALLEY_AREA_MIN_KM2 if area_min is None else area_min
+    area_max = _VALLEY_AREA_MAX_KM2 if area_max is None else area_max
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+    try:
+        root = valley_mod.resolve_river(rn, root_query)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    candidates = [root] + rn.upstream_rivers(root.id)
+
+    bassins = None
+    if bassins_path:
+        bassins = ws.load_bassins(bassins_path)
+
+    out_file = Path(out_path)
+    if out_file.exists():
+        existing = json.loads(out_file.read_text("utf-8"))
+        rivers_out: dict = existing.get("rivers", {})
+    else:
+        rivers_out = {}
+
+    n_skipped_wfs = 0
+    n_skipped_cached = 0
+    n_kept = 0
+    n_discarded = 0
+    n_failed = 0
+    stopped_early = None
+
+    def _write_out() -> None:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "meta": {
+                "demtype": demtype,
+                "acc_channel_cells": acc_channel_cells,
+                "area_min_km2": area_min,
+                "area_max_km2": area_max,
+                "root_id": root.id,
+            },
+            "rivers": rivers_out,
+        }
+        out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    for river in candidates:
+        if river.id in rivers_out:
+            n_skipped_cached += 1
+            continue
+        if bassins is not None:
+            ids = {river.id} | {r.id for r in rn.upstream_rivers(river.id)}
+            if ws.catchment_polygon(bassins, ids) is not None:
+                n_skipped_wfs += 1
+                continue
+
+        try:
+            poly, diag = valley_mod.delineate_river(
+                rn,
+                river.id,
+                dem_dir=Path(dem_dir),
+                demtype=demtype,
+                acc_channel_cells=acc_channel_cells,
+                dem_source=dem_source,
+            )
+        except requests.exceptions.HTTPError as exc:
+            # OpenTopography's daily-quota rejection comes back as a 401 (not
+            # a 429) with a "rate limit" XML body — not "bad key", "no more
+            # calls today". fetch_dem() folds that body into the exception's
+            # own message (see hydro/dem.py) since by the time it reaches us
+            # here the underlying streamed response is already closed and
+            # exc.response.text would just be empty. This is the one failure
+            # that isn't specific to this river — stop the whole batch (after
+            # writing out what we have) instead of ploughing into the same
+            # wall for every river left.
+            if "rate limit" in str(exc).lower():
+                stopped_early = (
+                    "hit OpenTopography's daily rate limit "
+                    f"({river.name or river.id} was next) — re-run this "
+                    "command later today or tomorrow to pick up where it left off"
+                )
+                break
+            click.echo(f"warning: {river.name or river.id}: {exc}", err=True)
+            n_failed += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 - a batch over ~600 rivers of
+            # real terrain will hit edge cases pysheds doesn't raise a
+            # RuntimeError for (e.g. an empty channel mask -> IndexError deep
+            # inside grid.snap_to_mask when a tile has no cell above
+            # acc_channel_cells). One river's oddity shouldn't sink the run.
+            click.echo(f"warning: {river.name or river.id}: {exc}", err=True)
+            n_failed += 1
+            continue
+
+        area = diag["area_km2"]
+        if not (area_min <= area <= area_max):
+            click.echo(
+                f"discarding {river.name or river.id}: {area:.1f} km² outside "
+                f"[{area_min}, {area_max}]",
+                err=True,
+            )
+            n_discarded += 1
+            continue
+
+        rings = polygon_to_rings(poly)
+        if rings is None:
+            click.echo(f"warning: {river.name or river.id}: empty polygon after simplify", err=True)
+            n_failed += 1
+            continue
+
+        rivers_out[river.id] = {
+            "catchment": rings,
+            "area_km2": round(area, 1),
+            "source": "dem",
+            "outlet_lonlat": list(diag["outlet_lonlat"]),
+            "snap_moved_cells": diag["snap_moved_cells"],
+        }
+        n_kept += 1
+        click.echo(f"kept {river.name or river.id}: {area:.1f} km²", err=True)
+        # write after every kept river, not just at the end: a batch this size
+        # runs long enough to hit an unrecoverable native crash (GDAL/rasterio
+        # memory corruption, a killed process, ...) that no Python except can
+        # catch — saving incrementally means a crash loses at most the one
+        # river in flight, not the whole run since the last save.
+        _write_out()
+
+    _write_out()
+
+    click.echo(
+        f"{len(candidates)} river(s) considered under {root.name or root.id}: "
+        f"{n_kept} kept, {n_skipped_wfs} skipped (WFS-covered), "
+        f"{n_skipped_cached} skipped (already cached), "
+        f"{n_discarded} discarded (out of area range), {n_failed} failed",
+        err=True,
+    )
+    click.echo(f"wrote {out_file} ({len(rivers_out)} total cached river(s))", err=True)
+    if stopped_early:
+        click.echo(f"stopped early: {stopped_early}", err=True)
 
 
 @valley.command("render")
@@ -668,8 +921,9 @@ def valley_render(
     """Delineate one river's catchment and bake it into a 3D diorama HTML file.
 
     QUERY is a river name (case-insensitive substring) or a ``COURDEAU…`` id.
-    Needs ``OPENTOPOGRAPHY_API_KEY`` set. The output HTML is self-contained
-    (three.js from a CDN at view time; everything else baked in) — no server.
+    Needs an OpenTopography API key (``OPENTOPOGRAPHY_API_KEY`` or
+    ``key.secret``). The output HTML is self-contained (three.js from a CDN at
+    view time; everything else baked in) — no server.
     """
     from pathlib import Path
 
@@ -815,8 +1069,9 @@ def valley_plate(
     Delineates the catchment from a DEM (as ``valley render`` does), pulls the
     human layer — trails, GR/HR routes, roads, refuges and cabanes, named
     summits and cols — from OpenStreetMap, and draws it all as an SVG (+ a
-    sibling PNG unless ``--no-png``). Needs ``OPENTOPOGRAPHY_API_KEY`` set; the
-    DEM tile and the Overpass response are both cached under ``data/raw``.
+    sibling PNG unless ``--no-png``). Needs an OpenTopography API key
+    (``OPENTOPOGRAPHY_API_KEY`` or ``key.secret``); the DEM tile and the
+    Overpass response are both cached under ``data/raw``.
 
     With ``--hillshade`` the four relief fields are computed once (hillshade,
     slope, core shadow, cast shadow — all numpy, no Blender) and ``--style``
@@ -1064,8 +1319,9 @@ def valley_diorama(
     ``<valleys-dir>/<slug>/<slug>_<view>_3d.png``, with a sibling ``.blend`` for
     hand-tweaking unless ``--no-save-blend``.
 
-    Needs ``OPENTOPOGRAPHY_API_KEY`` set for the DEM fetch (cached after the
-    first run) and a Blender on ``PATH`` (or ``--blender`` / ``VALLEESPYR_BLENDER``).
+    Needs an OpenTopography API key (``OPENTOPOGRAPHY_API_KEY`` or
+    ``key.secret``) for the DEM fetch (cached after the first run) and a
+    Blender on ``PATH`` (or ``--blender`` / ``VALLEESPYR_BLENDER``).
     """
     import shutil
     import subprocess

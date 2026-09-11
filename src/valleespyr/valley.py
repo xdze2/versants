@@ -267,15 +267,28 @@ def delineate_river(
     dem_dir: Path | None = None,
     demtype: str = "COP30",
     acc_channel_cells: int = 1000,
+    dem_source: str = "s3",
 ) -> tuple[BaseGeometry, dict]:
     """Delineate ``river_id``'s catchment from a DEM and sanity-check it.
 
     Fetches a DEM tile for :func:`catchment_bbox`, derives the pour point with
     :func:`outlet_point`, and runs :func:`valleespyr.hydro.dem.delineate`.
 
-    When ``dem_dir`` is given the tile is cached at
-    ``<dem_dir>/<demtype>_<river_id>.tif``; otherwise
-    :func:`~valleespyr.hydro.dem.fetch_dem` picks its own path.
+    ``dem_source`` picks how the tile is obtained:
+
+    * ``"s3"`` (default) — :func:`~valleespyr.hydro.dem.fetch_dem_s3`: public,
+      unauthenticated Copernicus GLO-30 tiles from AWS S3, cached per 1x1
+      degree grid cell (shared across every river whose bbox falls in the same
+      cell — most Pyrenean valleys need only one or two). No API key, no rate
+      limit.
+    * ``"opentopography"`` — :func:`~valleespyr.hydro.dem.fetch_dem`: the
+      OpenTopography REST API, needs an API key and is capped at 50
+      downloads/24h on the free tier (see ``valleespyr valley catchments
+      precompute``'s docstring). Kept for ``demtype`` values S3 doesn't carry.
+
+    When ``dem_dir`` is given, tiles are cached under it (per-cell for
+    ``"s3"``, per-river for ``"opentopography"``); otherwise each fetch
+    function picks its own default location under ``data/raw/dem``.
 
     Returns ``(polygon, diag)`` — ``diag`` is the dict from
     :func:`~valleespyr.hydro.dem.delineate` with four keys added:
@@ -294,12 +307,17 @@ def delineate_river(
     bbox = catchment_bbox(rn, river_id)
     olon, olat = outlet_point(rn, river_id)
 
-    dest: Path | None = None
-    if dem_dir is not None:
-        dem_dir.mkdir(parents=True, exist_ok=True)
-        dest = dem_dir / f"{demtype}_{river_id}.tif"
+    if dem_source == "s3":
+        tif = _dem.fetch_dem_s3(bbox, dem_dir=dem_dir)
+    elif dem_source == "opentopography":
+        dest: Path | None = None
+        if dem_dir is not None:
+            dem_dir.mkdir(parents=True, exist_ok=True)
+            dest = dem_dir / f"{demtype}_{river_id}.tif"
+        tif = _dem.fetch_dem(bbox, dest, demtype=demtype)
+    else:
+        raise ValueError(f"unknown dem_source {dem_source!r} (expected 's3' or 'opentopography')")
 
-    tif = _dem.fetch_dem(bbox, dest, demtype=demtype)
     poly, diag = _dem.delineate(
         tif, olon, olat, acc_channel_cells=acc_channel_cells
     )
