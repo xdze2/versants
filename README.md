@@ -193,52 +193,12 @@ valleespyr valley render "Gave de Lutour" \
     --from-file data/raw/troncon_hydrographique_pyrenees.parquet --exaggeration 1.5 -o lutour_3d.html
 ```
 
-## Data model — what the layers actually contain
+## Method
 
-Everything below is BD TOPO v3, sharing `cours_d_eau` ("watercourse") ids, which
-is what lets the layers join.
-
-### `troncon_hydrographique` — river segments (lines)
-
-A tronçon is **not** one reach between confluences: the layer splits wherever any
-attribute changes (nature, width class, admin limits) *and* at junctions, so
-segments are short — median **210 m**, up to 84 per named river. Confluences are
-always splits.
-
-**Connectivity** is by shared node id, not an explicit "next" field: each tronçon
-carries an upstream node (`..._ini`) and a downstream one (`..._fin`) from a
-shared `NOEUDHYD…` namespace. B follows A when `B.ini == A.fin`. That is the whole
-topology.
-
-Two wrinkles: node ids say how segments *touch*, not which way water flows — that
-is `sens_de_l_ecoulement`, and `Sens inverse` means swap the two nodes before
-adding the edge. And the graph is not one connected network — a bbox clips
-trunks, and BD TOPO does not carry Spanish-side segments (`code_du_pays = ES`)
-across the border, so a river whose outlet falls outside the extent surfaces as a
-root. Flow is acyclic; the result is a DAG. `hydro/rivers.py` does the roll-up.
-
-Fields used: `cleabs` (segment id), `lien_vers_noeud_hydrographique_ini/_fin`
-(connectivity), `sens_de_l_ecoulement`, `liens_vers_cours_d_eau` (roll-up key),
-`cpx_toponyme_de_cours_d_eau` (name, ~38% of segments), `numero_d_ordre`
-(Strahler, drives line width), `nature` (natural flow vs canal / conduit / lake),
-`fictif` (virtual link through a lake or braid), `reseau_principal_coulant`.
-
-### `bassin_versant_topographique` — sub-catchments (polygons)
-
-Polygons that tile the drainage area, one per **reach** of a watercourse rather
-than per whole river — `toponyme` reads "Le Gave de Pau du confluent de l'Ouzom
-au confluent du Béez". Each is keyed to its watercourse via
-`liens_vers_cours_d_eau_principal`. Coarse (median **49 km²**, from BD Carthage at
-20 m precision) and sparse — in the Gavarnie sample only 10 of 367 rivers get a
-polygon.
-
-The union of the sub-basins for a river *and every river upstream of it* is that
-river's real catchment area (`watershed.catchment_polygon`) — a drainage area,
-not a hull around the lines. Caveat: keyed to a *whole* watercourse, so the
-dissolve over-reaches for a river the tronçon dump cuts off mid-course.
-
-Fields used: `liens_vers_cours_d_eau_principal` (join key), `cleabs`, `toponyme`,
-`code_bdcarthage` / `code_hydrographique`.
+How the river tree is derived from BD TOPO, and how catchment polygons are
+computed (WFS sub-basins + DEM delineation) — data sources, algorithms,
+parameters, and the difficulties found along the way (axis-order quirks,
+confluence ambiguity, DEM crashes, ...) are all in **[METHOD.md](METHOD.md)**.
 
 ## Layout
 
