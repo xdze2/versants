@@ -30,8 +30,7 @@ first parent) and the alternates are recorded on the node as ``also_flows_into``
 Every node also carries the browse facts: length, Strahler order, valleys
 upstream, a study-local Pfafstetter code, and — where a
 ``bassin_versant_topographique`` dump is passed as ``bassins`` — a drainage
-``area_km2`` and a normalised catchment-outline SVG path (``icon``) for callers
-that want one; the bundled HTML renderer ignores the icon.
+``area_km2``.
 
 With ``geo=True`` the catalog also gets a flat ``geo`` block: the catchment
 bbox plus, per river id, its own tronçon centreline as one or more simplified
@@ -47,8 +46,8 @@ The WFS dump only covers a fraction of rivers; an optional ``dem_catchments``
 river the WFS misses, without ever overriding a WFS hit.
 
 Pure graph + shapely. ``bassins`` is a :class:`geopandas.GeoDataFrame` (loaded
-by :func:`valleespyr.watershed.load_bassins`); without it ``area_km2`` / ``icon``
-are ``None``.
+by :func:`valleespyr.watershed.load_bassins`); without it ``area_km2`` is
+``None``.
 """
 
 from __future__ import annotations
@@ -68,12 +67,6 @@ logger = logging.getLogger(__name__)
 # this and the codes get unwieldy for a browser; the tree itself carries the
 # rest of the structure.
 _PFAF_MAX_DEPTH = 6
-
-# Shape icon: the catchment outline is simplified until it has at most this many
-# vertices, then written as an SVG path in a normalised viewbox.
-_ICON_VIEWBOX = 100.0
-_ICON_MAX_VERTICES = 48
-_ICON_DECIMALS = 1
 
 
 # --------------------------------------------------------------------------- public
@@ -102,7 +95,6 @@ def build_catalog(
     *,
     bassins: gpd.GeoDataFrame | None = None,
     max_depth: int | None = None,
-    orient_outlet_down: bool = True,
     geo: bool = False,
     dem_catchments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -120,11 +112,8 @@ def build_catalog(
     module docstring for the git analogy.
 
     With ``bassins`` given, each node whose catchment is covered by the
-    ``bassin_versant_topographique`` dump gets an ``icon`` (SVG path string),
-    ``area_km2`` and ``n_sub_basins``; otherwise those are ``None`` / ``0``.
-    When ``orient_outlet_down`` the icon is rotated so the catchment's outlet
-    sits at the bottom of the glyph — every valley then reads "water leaves
-    here" the same way.
+    ``bassin_versant_topographique`` dump gets ``area_km2`` and
+    ``n_sub_basins``; otherwise those are ``None`` / ``0``.
 
     With ``geo=True`` a ``geo`` block is added: ``bbox`` (``[w, s, e, n]`` over
     the whole catchment) and ``rivers`` (``id -> {"line": [[[lon, lat], …], …],
@@ -139,8 +128,8 @@ def build_catalog(
     See :func:`_build_geo` for the precedence. ``build_catalog`` stays IO-free:
     the caller loads the JSON, same as it already loads ``bassins``.
 
-    Returns a dict with ``root`` (the tree), ``meta`` (counts, the root id,
-    whether icons were generated) and — with ``geo=True`` — ``geo``.
+    Returns a dict with ``root`` (the tree), ``meta`` (counts, the root id)
+    and — with ``geo=True`` — ``geo``.
     """
     from valleespyr.valley import resolve_river
 
@@ -149,10 +138,9 @@ def build_catalog(
     pfaf = _pfafstetter_codes(rn, root.id, max_depth=_PFAF_MAX_DEPTH)
 
     n_nodes = 0
-    n_icons = 0
 
     def visit(river: River, depth: int) -> dict[str, Any]:
-        nonlocal n_nodes, n_icons
+        nonlocal n_nodes
         n_nodes += 1
 
         mainline_id, trib_ids = _partition_children(rn, river.id)
@@ -168,7 +156,6 @@ def build_catalog(
             "pfafstetter": pfaf.get(river.id),
             "is_headwater": mainline_id is None and not trib_ids,
             "also_flows_into": _also_flows_into(rn, river.id),
-            "icon": None,
             "area_km2": None,
             "n_sub_basins": 0,
             "mainline": None,
@@ -176,12 +163,7 @@ def build_catalog(
         }
 
         if bassins is not None:
-            icon, area, n_sub = _icon_for_river(
-                rn, river.id, bassins, orient_outlet_down=orient_outlet_down
-            )
-            if icon is not None:
-                n_icons += 1
-            node["icon"] = icon
+            area, n_sub = _area_for_river(rn, river.id, bassins)
             node["area_km2"] = area
             node["n_sub_basins"] = n_sub
 
@@ -211,9 +193,7 @@ def build_catalog(
             "root_id": root.id,
             "root_name": root.name,
             "n_nodes": n_nodes,
-            "n_icons": n_icons,
-            "has_icons": bassins is not None,
-            "orient_outlet_down": orient_outlet_down and bassins is not None,
+            "has_areas": bassins is not None,
             "has_geo": geo,
             "model": "git",
         },
@@ -340,9 +320,7 @@ def _valley_catchment(
 ) -> list[list[list[float]]] | None:
     """A river's own catchment boundary in lon/lat, simplified for the map mask.
 
-    Unlike :func:`_icon_for_river` (which normalises into a little glyph), this
-    keeps real coordinates. See :func:`polygon_to_rings` for the simplification
-    recipe.
+    See :func:`polygon_to_rings` for the simplification recipe.
     """
     from valleespyr.watershed import catchment_polygon
 
@@ -596,123 +574,36 @@ def _inherit(rn: RiverNetwork, river_id: str, code: str, codes: dict[str, str]) 
         codes.setdefault(r.id, code)
 
 
-# -------------------------------------------------------------------- shape icon
+# -------------------------------------------------------------------- drainage area
 
 
-def _icon_for_river(
+def _area_for_river(
     rn: RiverNetwork,
     river_id: str,
     bassins: gpd.GeoDataFrame,
-    *,
-    orient_outlet_down: bool,
-) -> tuple[str | None, float | None, int]:
-    """(svg_path, area_km2, n_sub_basins) for a river, or (None, None, 0).
+) -> tuple[float | None, int]:
+    """(area_km2, n_sub_basins) for a river, or (None, 0) with no WFS coverage.
 
-    Dissolves the ``bassin_versant_topographique`` sub-basins keyed to this river
-    or any river upstream of it, projects to an equal-area-ish metric CRS for a
-    faithful outline, simplifies, normalises into a ``_ICON_VIEWBOX`` square
-    (y-down, SVG convention), and — if ``orient_outlet_down`` — rotates so the
-    outlet is at the bottom.
+    Dissolves the ``bassin_versant_topographique`` sub-basins keyed to this
+    river or any river upstream of it, and measures the union in an
+    equal-area-ish metric CRS.
     """
     import geopandas as gpd
-    import numpy as np
 
     from valleespyr.watershed import BASSIN_COURS_D_EAU, catchment_polygon
 
     river = rn.get(river_id)
     if river is None:
-        return None, None, 0
+        return None, 0
     ids = {river.id} | {r.id for r in rn.upstream_rivers(river.id)}
     poly = catchment_polygon(bassins, ids)
     if poly is None:
-        return None, None, 0
+        return None, 0
 
     gs = gpd.GeoSeries([poly], crs="EPSG:4326").to_crs("EPSG:2154")
-    metric = gs.iloc[0]
-    area_km2 = round(metric.area / 1e6, 1)
+    area_km2 = round(gs.iloc[0].area / 1e6, 1)
     n_sub = int(bassins[BASSIN_COURS_D_EAU].isin(ids).sum())
-
-    # outer ring of the largest part
-    geom = metric
-    if geom.geom_type == "MultiPolygon":
-        geom = max(geom.geoms, key=lambda g: g.area)
-    ring = geom.exterior
-    if ring is None or ring.is_empty:
-        return None, area_km2, n_sub
-
-    # simplify to a manageable vertex count
-    tol = 10.0
-    simple = ring
-    for _ in range(12):
-        if len(simple.coords) <= _ICON_MAX_VERTICES:
-            break
-        tol *= 1.7
-        simple = ring.simplify(tol, preserve_topology=True)
-        if simple.is_empty:
-            simple = ring
-            break
-    pts = np.asarray(simple.coords, dtype=float)
-    if len(pts) < 4:
-        return None, area_km2, n_sub
-
-    outlet_xy = None
-    if orient_outlet_down:
-        try:
-            from valleespyr.valley import outlet_point
-
-            olon, olat = outlet_point(rn, river_id)
-            outlet_xy = (
-                gpd.GeoSeries.from_xy([olon], [olat], crs="EPSG:4326")
-                .to_crs("EPSG:2154")
-                .iloc[0]
-                .coords[0]
-            )
-        except Exception:  # pragma: no cover - outlet geometry hiccup
-            logger.debug("icon outlet orientation failed for %s", river_id, exc_info=True)
-
-    path = _points_to_svg_path(pts, outlet_xy)
-    return path, area_km2, n_sub
-
-
-def _points_to_svg_path(pts, outlet_xy: tuple[float, float] | None = None) -> str:
-    """Normalise a closed polyline into a ``_ICON_VIEWBOX`` square, y-down, as an SVG path.
-
-    ``pts`` is in projected metres (y up). When ``outlet_xy`` (same CRS) is given,
-    the glyph is rotated so the centroid→outlet direction points straight down in
-    the final screen-space (y-down) square — every valley then drains toward the
-    bottom of its icon.
-    """
-    import numpy as np
-
-    p = np.asarray(pts, dtype=float)
-    c = p.mean(axis=0)
-    p = p - c
-    # world y is up; SVG y is down -> flip into screen space first
-    p[:, 1] = -p[:, 1]
-
-    if outlet_xy is not None:
-        # centroid->outlet in the same screen space (flip the outlet's y too)
-        ov = np.array([outlet_xy[0] - c[0], -(outlet_xy[1] - c[1])], dtype=float)
-        norm = float(np.hypot(*ov))
-        if norm > 1e-6:
-            # rotate so ov aligns with +y (down). current angle from +x is
-            # atan2(ov_y, ov_x); we want it at +pi/2.
-            rot = np.pi / 2 - np.arctan2(ov[1], ov[0])
-            ca, sa = np.cos(rot), np.sin(rot)
-            p = p @ np.array([[ca, -sa], [sa, ca]]).T
-
-    mn = p.min(axis=0)
-    span = (p.max(axis=0) - mn).max() or 1.0
-    scale = (_ICON_VIEWBOX - 2.0) / span  # 1px margin, uniform scale (aspect kept)
-    p = (p - mn) * scale
-    # centre within the square along both axes
-    p += (_ICON_VIEWBOX - (p.max(axis=0) - p.min(axis=0))) / 2.0 - p.min(axis=0)
-
-    d = np.round(p, _ICON_DECIMALS)
-    parts = [f"M{d[0, 0]} {d[0, 1]}"]
-    parts += [f"L{x} {y}" for x, y in d[1:]]
-    parts.append("Z")
-    return "".join(parts)
+    return area_km2, n_sub
 
 
 __all__ = ["build_catalog", "polygon_to_rings"]

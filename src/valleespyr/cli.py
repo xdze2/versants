@@ -1340,7 +1340,7 @@ def valley_plate(
     "bassins_path",
     type=click.Path(dir_okay=False, exists=True),
     default=None,
-    help="Local bassin_versant_topographique dump — adds a shape icon + area per "
+    help="Local bassin_versant_topographique dump — adds a drainage area per "
     "valley where a sub-basin covers it.",
 )
 @click.option(
@@ -1358,11 +1358,6 @@ def valley_plate(
     help="Fold the tree beyond this many confluences from the root into "
     "'+N rivers' leaves (default: no limit). Applies to both the JSON and the "
     "HTML graph.",
-)
-@click.option(
-    "--no-orient-outlet-down",
-    is_flag=True,
-    help="Keep icon outlines north-up instead of rotating each so its outlet points down.",
 )
 @click.option(
     "--geo",
@@ -1388,7 +1383,6 @@ def catalog_cmd(
     bassins_path: str | None,
     dem_catchments_path: str | None,
     max_depth: int | None,
-    no_orient_outlet_down: bool,
     geo: bool,
     output: str | None,
     html_output: str | None,
@@ -1429,7 +1423,6 @@ def catalog_cmd(
             bassins=bassins,
             dem_catchments=dem_catchments,
             max_depth=max_depth,
-            orient_outlet_down=not no_orient_outlet_down,
             geo=geo,
         )
     except ValueError as exc:
@@ -1438,7 +1431,7 @@ def catalog_cmd(
     m = catalog["meta"]
     click.echo(
         f"{m['n_nodes']} rivers under {m['root_name'] or m['root_id']}"
-        + (f"; areas from {bassins_path}" if m["has_icons"] else ""),
+        + (f"; areas from {bassins_path}" if m["has_areas"] else ""),
         err=True,
     )
     _dump(catalog, output)

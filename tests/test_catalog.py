@@ -9,8 +9,7 @@ Two hand-built networks make the expected shape obvious:
   ``also_flows_into``.
 
 The Gavarnie tronçon sample drives one end-to-end check when it is present.
-No DEM / bassin dump is used, so every ``icon`` is ``None`` here; the icon path
-is smoke-tested separately against ``_points_to_svg_path`` directly.
+No DEM / bassin dump is used, so every ``area_km2`` is ``None`` here.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ pytest.importorskip("shapely")
 
 from shapely.geometry import LineString  # noqa: E402
 
-from valleespyr.catalog import _points_to_svg_path, build_catalog  # noqa: E402
+from valleespyr.catalog import build_catalog  # noqa: E402
 from valleespyr.hydro.network import build_graph  # noqa: E402
 from valleespyr.hydro.rivers import build_river_network  # noqa: E402
 from valleespyr.render.catalog_html import catalog_to_html  # noqa: E402
@@ -170,11 +169,10 @@ def test_meta_declares_git_model(simple_rn):
     assert build_catalog(simple_rn, "Main")["meta"]["model"] == "git"
 
 
-def test_no_bassins_means_no_icons(simple_rn):
+def test_no_bassins_means_no_areas(simple_rn):
     cat = build_catalog(simple_rn, "Main")
-    assert cat["meta"]["has_icons"] is False
-    assert cat["meta"]["n_icons"] == 0
-    assert all(n["icon"] is None for n in walk(cat["root"]))
+    assert cat["meta"]["has_areas"] is False
+    assert all(n["area_km2"] is None for n in walk(cat["root"]))
 
 
 # ------------------------------------------------------- mainline vs tributaries
@@ -277,38 +275,6 @@ def test_max_depth_zero_truncates_root_tributaries(branchy_rn):
     assert root["tributaries"] == []
     assert root.get("mainline_truncated") is True
     assert root.get("tributaries_truncated") == root["n_tributaries"]
-
-
-# --------------------------------------------------------------------- svg path
-
-
-def test_points_to_svg_path_fits_viewbox():
-    square = [(0.0, 0.0), (100.0, 0.0), (100.0, 40.0), (0.0, 40.0), (0.0, 0.0)]
-    d = _points_to_svg_path(square)
-    assert d.startswith("M") and d.endswith("Z")
-    nums = [
-        float(tok)
-        for tok in d.replace("M", " ").replace("L", " ").replace("Z", " ").split()
-    ]
-    xs, ys = nums[0::2], nums[1::2]
-    assert min(xs) >= 0 and max(xs) <= 100
-    assert min(ys) >= 0 and max(ys) <= 100
-    # wider-than-tall input -> fills the x extent, centred in y
-    assert max(xs) - min(xs) > max(ys) - min(ys)
-
-
-def test_points_to_svg_path_orients_outlet_down():
-    # a tall diamond centred at origin (metres, y up); outlet due south
-    diamond = [(0.0, 10.0), (5.0, 0.0), (0.0, -10.0), (-5.0, 0.0), (0.0, 10.0)]
-    d = _points_to_svg_path(diamond, outlet_xy=(0.0, -100.0))
-    pts = [
-        tuple(map(float, pair.split()))
-        for pair in d.replace("M", "").replace("Z", "").split("L")
-    ]
-    lowest = max(pts, key=lambda p: p[1])  # largest y = bottom in SVG
-    cx = sum(x for x, _ in pts) / len(pts)
-    # the vertex nearest the outlet ends up at the bottom, roughly centred in x
-    assert abs(lowest[0] - cx) < 15
 
 
 # ------------------------------------------------------------------------- html
