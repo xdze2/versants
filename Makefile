@@ -1,8 +1,10 @@
 # valleespyr — build the static site published on GitHub Pages.
 #
-# The site is a single self-contained page: the Garonne river catalog rendered
-# as a collapsible git-graph + catchment mini-map (no server, no external
-# assets). GitHub Pages serves it from docs/ on the default branch.
+# The site is a single static page: the Garonne river catalog rendered as a
+# collapsible git-graph + a Leaflet catchment map (IGN/OSM basemap tiles
+# fetched live — the one part of the page that needs network access; a
+# catalog built without --geo stays fully self-contained). GitHub Pages
+# serves it from docs/ on the default branch.
 #
 #   make site      regenerate docs/index.html from the local tronçon dump
 #   make preview    serve docs/ at http://localhost:8000

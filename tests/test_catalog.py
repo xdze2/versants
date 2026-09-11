@@ -431,11 +431,16 @@ def test_geo_html_gets_a_map(branchy_rn):
     doc = catalog_to_html(cat)
     assert 'id="map"' in doc and 'class="mapcol"' in doc
     assert "has-geo" in doc  # JS opts the body into click-to-map
-    assert "http://" not in doc.replace('lang="en"', "")
-    assert "https://" not in doc
-    # no map column without a geo block
-    plain = catalog_to_html(build_catalog(branchy_rn, "CDE_STEM"))
+    # the map draws real IGN/OSM basemap tiles, so (unlike the rest of the
+    # page) this is the one part that needs network access — Leaflet plus
+    # the tile layers are pulled from public hosts
+    assert "leaflet" in doc.lower()
+    assert "data.geopf.fr" in doc
+    # no map column without a geo block, and a plain catalog stays offline
+    plain_cat = build_catalog(branchy_rn, "CDE_STEM")
+    plain = catalog_to_html(plain_cat)
     assert 'id="map"' not in plain
+    assert "https://" not in plain
 
 
 def test_map_line_width_scales_with_strahler_order(branchy_rn):

@@ -26,11 +26,13 @@ slider move or caret click. Beyond ``--max-depth`` a branch is folded to a
 ``+N rivers`` leaf as before.
 
 When the catalog carries a ``geo`` block (``valleespyr catalog --geo``) a third
-column holds a sticky mini-map: clicking a row draws just that river and its
-upstream network there, lon/lat projected in the browser, fit to frame. On the
-map each line's stroke width scales with the river's Strahler order (same read
-as the git-graph lanes), with the selected river and its network drawn heavier
-than the faint catchment context.
+column holds a sticky Leaflet map: an IGN topo or OpenStreetMap basemap (with
+an optional IGN relief-shading overlay), both fetched live from public tile
+servers — this is the one part of the page that needs network access.
+Clicking a row draws just that river and its upstream network on top as
+styled polylines, fit to frame. Each line's stroke width scales with the
+river's Strahler order (same read as the git-graph lanes), with the selected
+river and its network drawn heavier than the faint catchment context.
 
 ``render_catalog_html(catalog, path)`` writes the file; ``catalog_to_html`` gives
 the string.
@@ -52,9 +54,9 @@ LABEL_GAP = 14      # px between the lane area and the label column
 ELBOW_R = 5.0       # px corner radius on a merge elbow
 # Mini-map (only with a geo block).
 MAP_MIN = 340       # px — floor for the map column on narrow windows
-MAP_MAX_VW = 50     # % of window width — ceiling for the map column
-MAP_VB_W = 720      # SVG viewBox width  (internal units)
-MAP_VB_H = 760      # SVG viewBox height (internal units)
+MAP_MAX_VW = 75     # % of window width — ceiling for the map column
+MAP_H = 560         # px — fixed height of the Leaflet map viewport
+LEAFLET_VERSION = "1.9.4"
 
 # Strahler order -> (stroke width, colour). Index 0 == order 1; clamped to ends.
 _ORDER_STYLE = [
@@ -150,26 +152,37 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
   border: 1px solid var(--line); border-radius: 8px; background: #fff;
   overflow: hidden; width: 100%;
 }}
-#map {{ display: block; width: 100%; height: auto;
-  aspect-ratio: {map_ar}; background: #fbfcfd; }}
-#map path, #map circle {{ vector-effect: non-scaling-stroke; }}
-/* stroke-width is set per-path from the river's Strahler order (see _JS,
-   mapWidth); the values here are only the fallback for a river with no order. */
-#map .ctx {{ fill: none; stroke: #d3dae1; stroke-width: 0.8;
-  stroke-linecap: round; stroke-linejoin: round; }}
-#map .up {{ fill: none; stroke: #94a3b1; stroke-width: 1.1;
-  stroke-linecap: round; stroke-linejoin: round; }}
-#map .sel {{ fill: none; stroke: var(--accent); stroke-linecap: round;
-  stroke-linejoin: round; stroke-width: 2.4; }}
-#map .outlet {{ fill: var(--accent); stroke: #fff; stroke-width: 1; }}
-.mapcap {{
-  padding: 8px 10px; border-top: 1px solid var(--line); font-size: 11.5px;
+#map {{ display: block; width: 100%; height: {map_h}px; background: #dde3e7; }}
+#map .leaflet-container {{ font: inherit; background: #dde3e7; }}
+.maplayers {{
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  padding: 7px 10px; border-bottom: 1px solid var(--line);
+  font-size: 11.5px; color: var(--dim); background: #fff;
+}}
+.maplayers label {{ display: flex; gap: 5px; align-items: center; cursor: pointer; }}
+.maplayers .sep {{ width: 1px; height: 13px; background: var(--line); }}
+.infobox {{
+  padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12px;
   color: var(--dim); line-height: 1.5; min-height: 34px;
 }}
-.mapcap b {{ color: var(--ink); }}
-.mapcap a {{ color: var(--accent); text-decoration: none; white-space: nowrap; }}
-.mapcap a:hover {{ text-decoration: underline; }}
-.mapcap .hint {{ color: var(--faint); }}
+.infobox .hint {{ color: var(--faint); }}
+.infobox .title {{
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px;
+}}
+.infobox .title b {{ color: var(--ink); font-size: 14px; font-weight: 600; }}
+.infobox .title a {{ color: var(--accent); text-decoration: none; font-size: 11.5px;
+  white-space: nowrap; margin-left: auto; }}
+.infobox .title a:hover {{ text-decoration: underline; }}
+.infobox .stats {{
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 6px 14px;
+}}
+.infobox .stat {{ display: flex; flex-direction: column; }}
+.infobox .stat .v {{ color: var(--ink); font-variant-numeric: tabular-nums;
+  font-size: 13px; }}
+.infobox .stat .k {{ color: var(--faint); font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .04em; }}
+.infobox .also {{ display: block; margin-top: 6px; }}
 .name {{ font-weight: 600; }}
 .name.unnamed {{ color: var(--faint); font-weight: 400;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }}
@@ -177,8 +190,6 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .row.leaf[data-fold-into] {{ cursor: pointer; }}
 .row.leaf[data-fold-into]:hover .name {{ color: var(--accent); }}
 .more {{ color: var(--faint); font-size: 11px; }}
-.facts {{ color: var(--dim); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }}
-.facts .k {{ color: var(--faint); }}
 .pfaf {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10.5px; color: var(--accent); }}
 .also {{ color: #a5682f; font-size: 11px; }}
@@ -447,15 +458,6 @@ _JS = r"""
     return String(s).replace(/[&<>"]/g, c =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   }
-  function facts(n) {
-    const b = [];
-    if (n.length_km != null) b.push('<span class="k">len</span> ' + (+n.length_km) + ' km');
-    if (n.strahler) b.push('<span class="k">ord</span> ' + n.strahler);
-    if (n.n_upstream) b.push('<span class="k">up</span> ' + n.n_upstream);
-    if (n.area_km2) b.push('<span class="k">area</span> ' + (+n.area_km2) + ' km²');
-    if (n.pfafstetter) b.push('<span class="pfaf">' + esc(n.pfafstetter) + '</span>');
-    return b.join(' · ');
-  }
   function alsoHtml(n) {
     const a = n.also_flows_into || [];
     if (!a.length) return '';
@@ -495,7 +497,7 @@ _JS = r"""
       out += '<li class="row' + leaf + '" data-id="' + esc(n.id || '') +
              '" style="height:' + G.ROW_H + 'px">' + caret +
              '<span class="' + cls + '">' + label + src + '</span>' + extra +
-             '<span class="facts">' + facts(n) + alsoHtml(n) + '</span></li>';
+             alsoHtml(n) + '</li>';
     }
     labelsEl.innerHTML = out;
     applyFilter();
@@ -581,23 +583,41 @@ _JS = r"""
   }
   filterEl.addEventListener('input', applyFilter);
 
-  // --- catchment mini-map (only when the catalog carries a geo block) ---
+  // rows drive the selection (focus refold + map). Works with or without geo.
+  labelsEl.addEventListener('click', ev => {
+    if (ev.target.closest('.caret')) return;
+    const leaf = ev.target.closest('.row.leaf[data-fold-into]');
+    if (leaf) { focusOn(leaf.dataset.foldInto); return; }
+    const li = ev.target.closest('.row[data-id]');
+    if (li && li.dataset.id && nodeById[li.dataset.id]) focusOn(li.dataset.id);
+  });
+
+  render();
+  if (window._catalogInitGeo) window._catalogInitGeo(data, root, meta, labelsEl, esc, focusOn);
+})();
+"""
+
+# Only inlined when the catalog carries a ``geo`` block — keeps a plain
+# catalog page (no ``geo=True``) fully offline, with zero references to any
+# external host anywhere in its source. This is the one part of the page that
+# needs network access: it draws a real Leaflet map, with IGN/OSM tile
+# basemaps for topography, roads and (via labels on the IGN layer) summits,
+# and the river network on top as styled vector layers.
+_JS_GEO = r"""
+window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
   (function initGeo() {
     const geo = data.geo;
-    const svg = document.getElementById('map');
-    if (!geo || !geo.rivers || !geo.bbox || !svg) return;
+    const mapEl = document.getElementById('map');
+    if (!geo || !geo.rivers || !geo.bbox || !mapEl || !window.L) return;
     document.body.classList.add('has-geo');
 
-    const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height, PAD = 14;
-
-    // line weight on the map scales with Strahler order, same idea as the
-    // git-graph lanes but a wider spread so a trunk reads clearly against its
-    // headwaters. Non-scaling-stroke keeps these constant in screen px as the
-    // map zooms. `boost` fattens the picked-out selection over the faint ctx.
+    // line weight scales with Strahler order, same idea as the git-graph
+    // lanes but a wider spread so a trunk reads clearly against its
+    // headwaters. `boost` fattens the picked-out selection over the faint ctx.
     function mapWidth(order, boost) {
       const o = Math.min(Math.max(order || 1, 1), 7);
-      const w = (0.6 + (o - 1) * 0.52) * (boost || 1);
-      return boost && boost > 1 ? Math.max(w, 1.6) : w;  // keep picked-out lines visible
+      const w = (1.1 + (o - 1) * 0.7) * (boost || 1);
+      return boost && boost > 1 ? Math.max(w, 2.2) : w;
     }
 
     const node = {}, up = {};
@@ -613,74 +633,59 @@ _JS = r"""
     })(root);
 
     const [BW, BS, BE, BN] = geo.bbox;
-    const bdx = (BE - BW) || 1e-6, bdy = (BN - BS) || 1e-6;
-    const K = Math.min((W - 2 * PAD) / bdx, (H - 2 * PAD) / bdy);
-    const OX = (W - K * bdx) / 2, OY = (H - K * bdy) / 2;
-    const px = lon => OX + (lon - BW) * K;
-    const py = lat => OY + (BN - lat) * K;
+    const bounds = L.latLngBounds([BS, BW], [BN, BE]);
 
-    function pathD(subs) {
-      let d = '';
-      for (const sub of subs)
-        d += sub.map((p, i) => (i ? 'L' : 'M') + px(p[0]).toFixed(1) + ' ' +
-          py(p[1]).toFixed(1)).join('');
-      return d;
-    }
-    function boxOf(ids) {
-      let w = Infinity, s = Infinity, e = -Infinity, nn = -Infinity;
-      for (const id of ids) {
-        const g = geo.rivers[id];
-        if (!g) continue;
-        for (const sub of g.line) for (const [lon, lat] of sub) {
-          if (lon < w) w = lon; if (lon > e) e = lon;
-          if (lat < s) s = lat; if (lat > nn) nn = lat;
-        }
-      }
-      return isFinite(w) ? [w, s, e, nn] : null;
-    }
+    const map = L.map(mapEl, {
+      zoomControl: true, attributionControl: true, minZoom: 6, maxZoom: 17,
+    });
+    map.fitBounds(bounds, { padding: [14, 14] });
 
-    let ctx = '';
-    for (const id in geo.rivers)
-      ctx += '<path class="ctx" style="stroke-width:' +
-        mapWidth((node[id] || {}).strahler).toFixed(2) + '" d="' +
-        pathD(geo.rivers[id].line) + '"/>';
-    svg.innerHTML = '<g class="ctxg">' + ctx + '</g><g class="hi"></g>';
-    const hi = svg.querySelector('.hi');
+    // --- basemaps: IGN topo (key-free Plan IGN) and OSM, radio-selected ---
+    const ignPlan = L.tileLayer(
+      'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
+      '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png' +
+      '&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
+      { maxNativeZoom: 16, maxZoom: 17, attribution: 'Plan IGN — IGN/Geoportail' });
+    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxNativeZoom: 19, maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+    });
+    // key-free hillshade ("estompage"), its own tile matrix set (PM_0_15).
+    const hillshade = L.tileLayer(
+      'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
+      '&LAYER=ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW&STYLE=estompage_grayscale' +
+      '&FORMAT=image/png&TILEMATRIXSET=PM_0_15&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
+      { maxNativeZoom: 15, maxZoom: 17, opacity: 0.45, attribution: 'Estompage — IGN/Geoportail' });
 
-    let anim = null;
-    function setVB(v) { svg.setAttribute('viewBox', v.map(n => n.toFixed(1)).join(' ')); }
-    function easeVB(to) {
-      const from = [svg.viewBox.baseVal.x, svg.viewBox.baseVal.y,
-                    svg.viewBox.baseVal.width, svg.viewBox.baseVal.height];
-      if (anim) cancelAnimationFrame(anim);
-      if (!window.requestAnimationFrame) { setVB(to); return; }
-      const t0 = performance.now(), dur = 260;
-      setVB(to);
-      (function step(now) {
-        let u = Math.min(1, (now - t0) / dur);
-        u = u < .5 ? 2 * u * u : 1 - Math.pow(-2 * u + 2, 2) / 2;
-        setVB(from.map((f, i) => f + (to[i] - f) * u));
-        if (u < 1) anim = requestAnimationFrame(step); else setVB(to);
-      })(t0);
-    }
-    const MIN_SPAN = Math.min(W, H) * 0.42;
-    function frameToPx(box, mf) {
-      let cx = (px(box[0]) + px(box[2])) / 2, cy = (py(box[1]) + py(box[3])) / 2;
-      let w = Math.abs(px(box[2]) - px(box[0])), h = Math.abs(py(box[1]) - py(box[3]));
-      w += 2 * Math.max(w, h) * mf; h += 2 * Math.max(w, h) * mf;
-      w = Math.max(w, MIN_SPAN); h = Math.max(h, MIN_SPAN);
-      const ar = W / H;
-      if (w / h < ar) w = h * ar; else h = w / ar;
-      let x0 = cx - w / 2, y0 = cy - h / 2;
-      if (w >= W) { x0 = 0; w = W; } else x0 = Math.max(0, Math.min(x0, W - w));
-      if (h >= H) { y0 = 0; h = H; } else y0 = Math.max(0, Math.min(y0, H - h));
-      return [x0, y0, w, h];
+    ignPlan.addTo(map);
+
+    // river network panes, drawn above the basemap
+    const ctxPane = L.featureGroup().addTo(map);
+    const hiPane = L.featureGroup().addTo(map);
+
+    function toLatLngs(subs) {
+      return subs.map(sub => sub.map(([lon, lat]) => [lat, lon]));
     }
 
-    const cap = document.getElementById('mapcap');
+    for (const id in geo.rivers) {
+      L.polyline(toLatLngs(geo.rivers[id].line), {
+        color: '#7c8894', weight: mapWidth((node[id] || {}).strahler),
+        opacity: 0.55, lineCap: 'round', lineJoin: 'round',
+      }).addTo(ctxPane);
+    }
+
+    const cap = document.getElementById('infobox');
     let current = null, currentId = null;
     function cssEsc(s) {
       return window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
+    }
+    function boundsOf(ids) {
+      const pts = [];
+      for (const id of ids) {
+        const g = geo.rivers[id];
+        if (!g) continue;
+        for (const sub of g.line) for (const [lon, lat] of sub) pts.push([lat, lon]);
+      }
+      return pts.length ? L.latLngBounds(pts) : null;
     }
 
     // paint the map for a selection; the graph refold is driven separately
@@ -689,32 +694,48 @@ _JS = r"""
       const g = geo.rivers[id];
       if (!g) return;
       currentId = id;
-      let parts = '';
+      hiPane.clearLayers();
       for (const uid of up[id] || []) {
         const ug = geo.rivers[uid];
-        if (ug) parts += '<path class="up" style="stroke-width:' +
-          mapWidth((node[uid] || {}).strahler, 1.25).toFixed(2) + '" d="' +
-          pathD(ug.line) + '"/>';
+        if (!ug) continue;
+        L.polyline(toLatLngs(ug.line), {
+          color: '#5b6b7a', weight: mapWidth((node[uid] || {}).strahler, 1.25),
+          opacity: 0.85, lineCap: 'round', lineJoin: 'round',
+        }).addTo(hiPane);
       }
-      parts += '<path class="sel" style="stroke-width:' +
-        mapWidth((node[id] || {}).strahler, 1.7).toFixed(2) + '" d="' +
-        pathD(g.line) + '"/>';
-      const ox = px(g.outlet[0]), oy = py(g.outlet[1]);
-      parts += '<circle class="outlet" cx="' + ox.toFixed(1) + '" cy="' +
-               oy.toFixed(1) + '" r="3.2"/>';
-      hi.innerHTML = parts;
-      const box = boxOf([id].concat(up[id] || []));
-      if (box) easeVB(frameToPx(box, 0.18));
+      L.polyline(toLatLngs(g.line), {
+        color: '#2f6f4f', weight: mapWidth((node[id] || {}).strahler, 1.7),
+        opacity: 1, lineCap: 'round', lineJoin: 'round',
+      }).addTo(hiPane);
+      L.circleMarker([g.outlet[1], g.outlet[0]], {
+        radius: 4.5, color: '#fff', weight: 1, fillColor: '#2f6f4f', fillOpacity: 1,
+      }).addTo(hiPane);
+
+      const box = boundsOf([id].concat(up[id] || []));
+      if (box) map.flyToBounds(box, { padding: [34, 34], duration: 0.4, maxZoom: 15 });
+
       const n = node[id] || {};
-      const bits = [];
-      if (n.length_km != null) bits.push(n.length_km + ' km');
-      if (n.area_km2) bits.push(n.area_km2 + ' km²');
       const nUp = (up[id] || []).length;
-      bits.push(nUp ? nUp + ' rivers upstream' : 'headwater');
-      cap.innerHTML = '<b>' + esc(n.name || id) + '</b> · ' + bits.join(' · ') +
-        ' · <a href="#" id="mapreset">⤢ whole catchment</a>';
+      const stats = [];
+      if (n.length_km != null) stats.push(['length', (+n.length_km) + ' km']);
+      if (n.strahler) stats.push(['order', n.strahler]);
+      stats.push(['upstream', nUp ? nUp + ' rivers' : 'headwater']);
+      if (n.area_km2) stats.push(['area', (+n.area_km2) + ' km²']);
+      if (n.pfafstetter) stats.push(['pfafstetter', esc(n.pfafstetter)]);
+      const statsHtml = stats.map(([k, v]) =>
+        '<span class="stat"><span class="v">' + v + '</span>' +
+        '<span class="k">' + k + '</span></span>').join('');
+      const a = n.also_flows_into || [];
+      const alsoHtml = a.length
+        ? '<span class="also" title="bifurcation">⋔ also flows into ' +
+          a.map(x => esc(x.name || x.id)).join(', ') + '</span>'
+        : '';
+      cap.innerHTML =
+        '<div class="title"><b>' + esc(n.name || id) +
+        '</b><a href="#" id="mapreset">⤢ whole catchment</a></div>' +
+        '<div class="stats">' + statsHtml + '</div>' + alsoHtml;
       document.getElementById('mapreset').addEventListener('click', ev => {
-        ev.preventDefault(); easeVB([0, 0, W, H]);
+        ev.preventDefault(); map.flyToBounds(bounds, { padding: [14, 14], duration: 0.4 });
       });
       syncSelectedRow();
     }
@@ -728,20 +749,22 @@ _JS = r"""
     window._catalogGeoSync = syncSelectedRow;
     window._catalogMapSelect = paintMap;
 
+    // --- layer switcher UI: basemap radios + hillshade toggle -----------
+    const baseRadios = document.querySelectorAll('input[name="maplayer"]');
+    baseRadios.forEach(r => r.addEventListener('change', () => {
+      map.removeLayer(ignPlan); map.removeLayer(osm);
+      (r.value === 'osm' ? osm : ignPlan).addTo(map);
+      ctxPane.bringToFront(); hiPane.bringToFront();
+    }));
+    const shadeBox = document.getElementById('maphillshade');
+    if (shadeBox) shadeBox.addEventListener('change', () => {
+      if (shadeBox.checked) { hillshade.addTo(map); ctxPane.bringToFront(); hiPane.bringToFront(); }
+      else map.removeLayer(hillshade);
+    });
+
     if (geo.rivers[meta.root_id]) focusOn(meta.root_id);
   })();
-
-  // rows drive the selection (focus refold + map). Works with or without geo.
-  labelsEl.addEventListener('click', ev => {
-    if (ev.target.closest('.caret')) return;
-    const leaf = ev.target.closest('.row.leaf[data-fold-into]');
-    if (leaf) { focusOn(leaf.dataset.foldInto); return; }
-    const li = ev.target.closest('.row[data-id]');
-    if (li && li.dataset.id && nodeById[li.dataset.id]) focusOn(li.dataset.id);
-  });
-
-  render();
-})();
+};
 """
 
 
@@ -771,13 +794,18 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         start_order = min(max_ord - 1, max(4, max_ord - 3))
 
     if has_geo:
-        map_w_css = f"clamp({MAP_MIN}px, {MAP_MAX_VW}vw, 50vw)"
-        rest_cols = f"minmax(220px, 1fr) {map_w_css}"
+        map_w_css = f"clamp({MAP_MIN}px, 60vw, {MAP_MAX_VW}vw)"
+        rest_cols = f"minmax(160px, 1fr) {map_w_css}"
         map_col = (
             f'<div class="mapcol"><div class="mapcard">'
-            f'<svg id="map" viewBox="0 0 {MAP_VB_W} {MAP_VB_H}" '
-            f'preserveAspectRatio="xMidYMid meet" aria-label="selected river network"></svg>'
-            f'<div id="mapcap" class="mapcap"><span class="hint">click a river…</span></div>'
+            f'<div class="maplayers">'
+            f'<label><input type="radio" name="maplayer" value="ign" checked> IGN topo</label>'
+            f'<label><input type="radio" name="maplayer" value="osm"> OpenStreetMap</label>'
+            f'<span class="sep"></span>'
+            f'<label><input type="checkbox" id="maphillshade"> relief shading</label>'
+            f"</div>"
+            f'<div id="map" aria-label="selected river network"></div>'
+            f'<div id="infobox" class="infobox"><span class="hint">click a river…</span></div>'
             f"</div></div>"
         )
     else:
@@ -807,8 +835,8 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
 
     css = _CSS_TMPL.format(
         grid_cols=grid_cols,
-        map_ar=f"{MAP_VB_W} / {MAP_VB_H}",
         map_top=128,
+        map_h=MAP_H,
     )
 
     geom = {
@@ -821,8 +849,21 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         _JS.replace("__GEOM__", json.dumps(geom))
         .replace("__ORDER_STYLE__", json.dumps(_ORDER_STYLE))
     )
+    # _JS_GEO must run first: it defines window._catalogInitGeo, which the
+    # base script's IIFE calls (synchronously, at its own end) once it exists.
+    if has_geo:
+        js = _JS_GEO + js
 
     payload = json.dumps(catalog, ensure_ascii=False).replace("<", "\\u003c")
+
+    leaflet_head = (
+        f'<link rel="stylesheet" '
+        f'href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.min.css">'
+        f'<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.js">'
+        f"</script>"
+        if has_geo
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -831,6 +872,7 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)} — river git-graph</title>
 <style>{css}</style>
+{leaflet_head}
 </head>
 <body>
 <header>
