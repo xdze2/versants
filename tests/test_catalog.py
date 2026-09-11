@@ -613,7 +613,10 @@ def test_gavarnie_catalog_end_to_end():
 
     root = cat["root"]
     assert root["name"] == "Gave de Pau"
-    assert cat["meta"]["n_nodes"] > 100
+    # nameless cours_d_eau records are folded into their named downstream
+    # river (see hydro/rivers.py::_merge_nameless), so this is well under the
+    # sample's raw river count.
+    assert cat["meta"]["n_nodes"] > 50
     assert cat["meta"]["model"] == "git"
 
     # the root's tributaries are ordered biggest-catchment first

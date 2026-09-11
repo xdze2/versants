@@ -177,6 +177,60 @@ def test_summary_rows_sorted_longest_first(rn):
     assert rows[0]["name"] in {"Main", "Trib"}  # the two named rivers, longest first
 
 
+# ------------------------------------------------------------ nameless cours_d_eau
+
+
+def test_nameless_river_merges_into_its_named_downstream_river():
+    """A cours_d_eau WITH a stable id but no toponyme is pure tree-graph noise;
+    it should fold into the named river directly downstream of it, same as an
+    unnamed reach (no id at all) already folds into its named river.
+
+        MAIN_1                      (cours_d_eau CDE_MAIN, "Main")
+       s ---> o
+              ^
+        TRIB_1|                     (cours_d_eau CDE_TRIB, "Trib")
+              t
+              ^
+       NONAME_1|                    (cours_d_eau CDE_NONAME, no toponyme)
+               n
+    """
+    rows = [
+        ("MAIN_1", "N_s", "N_o", "CDE_MAIN", "Main", [(-0.05, 42.80), (0.0, 42.78)]),
+        ("TRIB_1", "N_t", "N_s", "CDE_TRIB", "Trib", [(-0.06, 42.83), (-0.05, 42.80)]),
+        ("NONAME_1", "N_n", "N_t", "CDE_NONAME", None, [(-0.07, 42.86), (-0.06, 42.83)]),
+    ]
+    gdf = gpd.GeoDataFrame(
+        {
+            "cleabs": [r[0] for r in rows],
+            "lien_vers_noeud_hydrographique_ini": [r[1] for r in rows],
+            "lien_vers_noeud_hydrographique_fin": [r[2] for r in rows],
+            "sens_de_l_ecoulement": ["Sens direct"] * len(rows),
+            "numero_d_ordre": ["2", "1", "1"],
+            "cpx_toponyme_de_cours_d_eau": [r[4] for r in rows],
+            "liens_vers_cours_d_eau": [r[3] for r in rows],
+            "fictif": [False] * len(rows),
+            "reseau_principal_coulant": [True] * len(rows),
+            "nature": ["Ecoulement naturel"] * len(rows),
+            "geometry": [LineString(r[5]) for r in rows],
+        },
+        crs="EPSG:4326",
+    )
+    gdf["length_m"] = gdf.geometry.to_crs("EPSG:2154").length
+    # a string-dtype column can't hold a real None (pandas coerces it to "nan");
+    # real data goes through network.py::_prepare to fix this up before it
+    # reaches build_graph, so redo that one normalisation here.
+    col = gdf["cpx_toponyme_de_cours_d_eau"].astype(object)
+    gdf["cpx_toponyme_de_cours_d_eau"] = col.where(col.notna(), None)
+
+    rn = build_river_network(build_graph(gdf))
+
+    assert {r.id for r in rn} == {"CDE_MAIN", "CDE_TRIB"}
+    trib = rn.get("CDE_TRIB")
+    assert "NONAME_1" in trib.segments
+    assert rn.segment_to_river["NONAME_1"] == "CDE_TRIB"
+    assert trib.parent_id == "CDE_MAIN"
+
+
 # ------------------------------------------------------------------ offline sample
 
 

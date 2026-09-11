@@ -26,11 +26,18 @@ and — when the segment belongs to a named watercourse — a stable
 2. `build_river_network` (`hydro/rivers.py`) rolls individual tronçons up
    into **rivers**: every edge with a `liens_vers_cours_d_eau` id is grouped
    by that id (first id when several are `/`-joined); an edge with no id (an
-   *unnamed reach*) is merged into whichever named river it drains into. The
-   result is a much smaller river-level `DiGraph` — one node per watercourse,
-   one "flows into" edge to its parent — with each `River` carrying its
-   segment set, total length, outlet node, Strahler order, and parent/child
-   ids.
+   *unnamed reach*) is merged into whichever named river it drains into. A
+   `cours_d_eau` that *has* a stable id but no toponyme — BD TOPO gave it an
+   id but nobody named it, almost always a short headwater reach — is then
+   folded the same way into the named river directly downstream of it
+   (`_merge_nameless`); left as its own node it was pure noise in the
+   browsable tree (for la Garonne's catchment this drops it from 629 rivers
+   to 355, all named). A cycle this collapsing exposes between two named
+   rivers (an indirect path becoming a direct edge) is swept up by re-running
+   the cycle merge (below) afterward. The result is a much smaller
+   river-level `DiGraph` — one node per watercourse, one "flows into" edge to
+   its parent — with each `River` carrying its segment set, total length,
+   outlet node, Strahler order, and parent/child ids.
 3. Everything downstream of this (a river's own path, its full upstream
    catchment as a set of rivers, tree navigation) is a walk over this river
    graph — see `RiverNetwork.upstream_rivers` / `downstream_path`.

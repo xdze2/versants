@@ -399,6 +399,19 @@ def build_river_network(
     # the graph is a DAG (catchment / downstream-path walks depend on it).
     _merge_cycles(rivers, rg, segment_to_river, names)
 
+    # A ``cours_d_eau`` record with no toponyme (BD TOPO gave it a stable id but
+    # nobody named it) is almost always a short headwater reach; left as its own
+    # river it is pure noise in the browsable tree — a blank-named leaf at every
+    # confluence. Fold each into the river directly downstream of it, same as an
+    # unnamed *reach* (no id at all) already gets folded in step 2 above.
+    _merge_nameless(rivers, rg, segment_to_river)
+
+    # Collapsing a chain through a nameless river can turn an indirect path
+    # between two named rivers into a direct edge, exposing a 2-river cycle
+    # that the first _merge_cycles pass (run before any nameless node was
+    # collapsed) couldn't see yet. Sweep again now the graph has settled.
+    _merge_cycles(rivers, rg, segment_to_river, names)
+
     for rid in rivers:
         preds = list(rg.predecessors(rid))
         succs = sorted(rg.successors(rid))
@@ -460,6 +473,53 @@ def _merge_cycles(
             kept.name = names[keep].most_common(1)[0][0]
         # ``kept.outlet`` is left as-is: still a valid downstream node of the
         # merged river, and good enough for the catchment trace.
+
+
+def _merge_nameless(
+    rivers: dict[str, River],
+    rg: nx.DiGraph,
+    segment_to_river: dict[str, str],
+) -> None:
+    """Fold every nameless river into the river directly downstream of it.
+
+    Walks each nameless river down its single river-graph successor (a DAG at
+    this point — cycles are already merged) until it reaches a named river or a
+    root, absorbing segments/length/order along the way; a chain of several
+    nameless rivers in a row collapses in one pass. A nameless *root* (no
+    downstream at all inside the loaded network) is left alone — nothing to
+    merge it into.
+    """
+    import networkx as nx
+
+    # process leaves-up so a river's own downstream target is already resolved
+    for rid in list(nx.topological_sort(rg)):
+        r = rivers.get(rid)
+        if r is None or r.name is not None:
+            continue
+        succs = sorted(rg.successors(rid))
+        if not succs:
+            continue  # nameless root: nothing downstream to merge into
+        target_id = succs[0]
+        target = rivers[target_id]
+
+        target.segments |= r.segments
+        target.nodes |= r.nodes
+        target.length_m += r.length_m
+        if r.max_order is not None:
+            target.max_order = (
+                r.max_order if target.max_order is None else max(target.max_order, r.max_order)
+            )
+        for cid in r.segments:
+            segment_to_river[cid] = target_id
+
+        # rewire: everything that flowed into rid now flows into target
+        for pred in list(rg.predecessors(rid)):
+            if pred != target_id:
+                rg.add_edge(pred, target_id)
+        for succ in succs[1:]:
+            rg.add_edge(target_id, succ)
+        rg.remove_node(rid)
+        del rivers[rid]
 
 
 def _pick_outlet(
