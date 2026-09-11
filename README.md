@@ -85,6 +85,8 @@ with the name and facts to the right, `▲` marking a source and `+N` a folded
 branch. One file — inline CSS + a few lines of JS for a name filter — no server,
 no CDN.
 
+![la Garonne — river git-graph](docs/images/garonne_catalog_html.png)
+
 The Pfafstetter code is **study-local**: it is a path from the chosen root over
 the loaded (bbox-clipped) network, so it sorts and gives an "is-upstream-of"
 test *within one catalog* but is not comparable across catalogs or to published
