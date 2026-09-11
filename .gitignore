@@ -4,6 +4,9 @@
 !/data/raw/.gitkeep
 !/data/processed/.gitkeep
 
+# the published site (docs/ is the GitHub Pages source) IS tracked — it holds
+# the generated catalog page, regenerated locally via `make site`.
+
 # per-valley: keep valley.toml + final PNG renders; drop the regenerable
 # derived/ step and the .blend (rebuilt from valley.toml on the next render)
 /data/valleys/*/derived/
