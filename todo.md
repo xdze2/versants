@@ -3,9 +3,104 @@
 Goal: compute a **real catchment polygon for any river**, from a DEM, because
 `bassin_versant_topographique` cannot give us one.
 
-Next session: a single self-contained demo script that delineates the **Gave de
-Lutour** catchment from a GLO-30 tile and compares it against the known 39 km²
-BD TOPO polygon. Validate on one valley before building any pipeline.
+## DONE — promoted to a real batch pipeline, catalog map masking (2026-09-11)
+
+The Lutour demo (below) is promoted. `hydro/dem.py`, `valley.py::delineate_river`,
+`catalog.py`, and a new CLI command now form a real, repeatable pipeline: the
+catalog's Leaflet map dims everything outside the selected river's catchment
+when that catchment reads as "one valley" (5–150 km²), and the polygon comes
+from `bassin_versant_topographique` where it exists, DEM delineation where it
+doesn't.
+
+**`hydro/dem.py`:**
+
+- Split `delineate()` into `condition(tif)` (pit-fill → depressions → flats →
+  flow-dir → accumulation, expensive, once per tile) and `trace(conditioned,
+  lon, lat)` (snap → catchment → vectorise, cheap, once per river) so a future
+  batch could condition a tile once and trace several rivers sharing it.
+  `delineate()` stays as a thin wrapper — unchanged signature/callers.
+- **Real bug found and fixed**: `grid.clip_to(catch)` mutates the shared
+  pysheds `Grid`'s viewfinder in place — a second `trace()` on the same
+  `ConditionedGrid` silently returned a different (wrong) polygon. Fixed with a
+  local trimmed `View.trim_zeros` viewfinder instead of mutating `grid`.
+  Verified byte-identical output across two calls against the real Lutour tile.
+- **`fetch_dem_s3(bbox, dem_dir=None)`**: pulls Copernicus GLO-30 tiles
+  straight from the public, unauthenticated AWS S3 bucket
+  (`copernicus-dem-30m`, one 1°×1° COG per grid cell, plain HTTPS, no key, no
+  rate limit) instead of the OpenTopography REST API, and mosaics/crops with
+  `rasterio.merge` when a bbox spans more than one cell. **This is now
+  `delineate_river`'s default** (`dem_source="s3"`) — the OpenTopography path
+  (`dem_source="opentopography"`) still exists for `demtype` values S3 doesn't
+  carry, but needs a key and caps at 50 downloads/24h on the free tier.
+  Two 1°×1° tiles (~86 MB total) cover the *entire* Garonne catchment; the old
+  per-river OpenTopography cache (keyed by river id, not bbox) was
+  re-downloading heavily overlapping terrain under a different filename every
+  time — the actual reason the rate limit hurt as much as it did.
+- **Native crash found and fixed**: `pysheds` 0.5's `grid.catchment()`
+  corrupts memory (`double free or corruption`, a C-level abort — not a
+  catchable Python exception, kills the process) on a tile whose flow-
+  accumulation channel mask is nearly empty (0–1 cells above threshold,
+  vs. 664 on a normal small-river tile). Root-caused by bisecting a
+  reproducible segfault down to one specific river/tile in complete process
+  isolation. Fixed with a `MIN_CHANNEL_CELLS` guard in `trace()` that raises a
+  clean `RuntimeError` before ever calling `grid.catchment()` on a tile that
+  sparse.
+- `fetch_dem`'s `stream=True` GET means the response body is unreadable once
+  the `with` block has closed the connection — a caller catching `HTTPError`
+  after `fetch_dem` returns saw `exc.response.text == ""`, silently losing
+  OpenTopography's actual reason (e.g. `"API maximum rate limit reached"`).
+  Fixed by reading the body while the connection is still open and folding it
+  into the exception's own message.
+- OpenTopography key resolution: `OPENTOPOGRAPHY_API_KEY` env var, else a
+  `key.secret` file (gitignored, `*.secret`) at the repo root.
+
+**`cli.py`** — new `valleespyr valley catchments precompute <root>`:
+walks a river's whole upstream tree, skips a river already covered by
+`--bassins` (WFS wins, DEM only fills gaps) or already present in `--out`,
+DEM-delineates the rest, keeps a result only if its *measured* area lands in
+`[--area-min, --area-max]` (default: `catalog._VALLEY_AREA_MIN_KM2`/`_MAX_KM2`,
+the same "one valley" range the map mask uses), and writes/merges a JSON cache
+(`data/processed/catchments.json` by default). Made deliberately hard to break
+on a ~600-river real-terrain batch:
+
+- OpenTopography's daily-quota rejection is detected (by message, not status
+  code — see above) and stops the batch cleanly with a "re-run later" message
+  instead of crashing.
+- Any *other* per-river failure (bad geometry, the sparse-channel guard, a
+  degenerate bbox GDAL rejects, ...) is logged and skipped — one river's
+  oddity doesn't sink 600 others.
+- **Writes its output after every kept river, not just once at the end** — an
+  unrecoverable crash (the native segfault above, or anything else no `except`
+  could catch) loses at most the river in flight, not everything since the
+  last save. This is what actually saved the run in practice, twice, before
+  the segfault's root cause was found.
+
+Verified end to end against the real Garonne tree (629 rivers): the command
+now runs to completion, exit 0, no crash — 50 rivers kept (measured area in
+range), 6 skipped as WFS-covered, 254 discarded (measured area out of range),
+320 failed (mostly the sparse-channel guard catching genuinely tiny headwater
+rivulets). `--dem-source` defaults to `s3`.
+
+**`catalog.py`**: `build_catalog`/`_build_geo` gain an optional
+`dem_catchments` dict (the precompute output's `"rivers"` sub-dict, loaded by
+the caller — `build_catalog` stays IO-free). Resolution order per qualifying
+river: WFS polygon (`_valley_catchment`) wins when present, `dem_catchments`
+fills the gap when it's `None`, otherwise no catchment (today's unmasked
+fallback). Extracted the Douglas-Peucker ring-simplification both paths need
+into a shared `polygon_to_rings()`.
+
+**`render/catalog_html.py`**: the Leaflet map draws the catchment ring as a
+world-covering polygon with the catchment cut out as a hole (even-odd fill),
+in its own pane between the basemap tiles and the highlighted river network —
+so a valley-sized selection reads as its own bounded world, dimmed everywhere
+outside it, while the git-graph list stays compact (per-row length/order/
+area/etc. stats moved into an info box below the map, room to add more later).
+
+**Not done yet**: `data/processed/catchments.json` is computed but not wired
+into `docs/index.html` — `catalog_cmd` (the `valleespyr catalog` CLI command)
+has no `--dem-catchments` flag yet, so `make site` still builds without the
+DEM fallback. Small addition when wanted: load the JSON's `rivers` dict, pass
+as `build_catalog(..., dem_catchments=...)`.
 
 ## DONE — the Lutour demo works (2026-09-10)
 
@@ -42,11 +137,14 @@ Gotchas found:
 
 ### Next
 
-1. Run the *same* script on **Neste de Rioumajou** — the border-straddling case
-   the whole exercise is for. COP30 covers Spain; the outlet coord comes from the
-   tronçon dump the same way. No reference polygon exists, so the check is
-   "plausible area + contains its own streams".
-2. Then promote to `src/valleespyr/hydro/dem.py` (see "After the demo works").
+1. ~~Then promote to `src/valleespyr/hydro/dem.py`~~ — **done, see the
+   2026-09-11 entry above.**
+2. Still open: run the pipeline specifically on **Neste de Rioumajou** — the
+   border-straddling case the whole exercise is for. COP30 covers Spain; the
+   outlet coord comes from the tronçon dump the same way. No reference polygon
+   exists, so the check is "plausible area + contains its own streams". The
+   2026-09-11 batch run covered the whole Garonne tree generically but this
+   specific named case was never singled out and checked.
 
 ## Why (measured, not assumed)
 
@@ -161,15 +259,20 @@ Alternatives if pysheds disappoints: `richdem` (faster on big grids),
 
 ## After the demo works
 
-- Promote to `src/valleespyr/hydro/dem.py`: `fetch_dem(bbox)`,
-  `delineate(dem, lon, lat)` → shapely polygon, tile caching.
-- Wire into the app: when a river has no `bassin_versant_topographique` polygon,
-  offer "compute catchment from DEM". Keep the BD TOPO polygon where it exists —
-  it stays useful as a **validation reference**, not a competitor.
+- ~~Promote to `src/valleespyr/hydro/dem.py`~~ — **done (2026-09-11)**:
+  `fetch_dem`/`fetch_dem_s3`, `condition`/`trace`/`delineate`, tile caching.
+- ~~Wire into the app: when a river has no `bassin_versant_topographique`
+  polygon, offer "compute catchment from DEM"~~ — **done for the catalog map**
+  (2026-09-11): `valley catchments precompute` + `build_catalog(...,
+  dem_catchments=...)`, WFS wins where it exists. **Still open**: no
+  `--dem-catchments` flag on the `valleespyr catalog` CLI command yet, so
+  `make site` doesn't use the precomputed cache — see the 2026-09-11 entry's
+  "Not done yet" note.
 - Real area/elevation stats per catchment (hypsometry, min/max/mean elevation) —
-  this is what the 3D maps actually want.
+  this is what the 3D maps actually want. Still open; `trace()`'s diagnostics
+  don't compute this yet, only area.
 - Drape the traced stream network on the DEM (`Merge traced network → single
-  MultiLineString`, carried over from the earlier todo).
+  MultiLineString`, carried over from the earlier todo). Still open.
 
 ## Still open (carried over, unrelated to DEM)
 
@@ -201,6 +304,11 @@ Alternatives if pysheds disappoints: `richdem` (faster on big grids),
 
 ## Current state
 
+*(Data/code lists below predate several sessions of work — e.g. `catalog.py`,
+`render/catalog_html.py`, `cli.py`, `hydro/dem.py` and the test count are all
+missing/stale; not rewritten wholesale here, only appended to with what this
+DEM session added.)*
+
 - **Data** (gitignored):
   - `data/raw/troncon_hydrographique_pyrenees.parquet` — **62111 features**,
     bbox `-0.80,42.60,0.65,43.55`. 6652 rivers, 2755 named, 1639 roots.
@@ -209,10 +317,23 @@ Alternatives if pysheds disappoints: `richdem` (faster on big grids),
     covers the tronçon bbox comfortably (`-1.857,42.333 → 3.357,43.639`).
   - `data/raw/troncon_hydrographique_gavarnie_sample.geojson` — 3097 edges.
     **Keep as the offline test fixture** (fast).
+  - `data/raw/dem/` (2026-09-11) — cached DEM tiles: legacy per-river
+    OpenTopography `.tif`s (keyed by river id, superseded) alongside the
+    new S3 tiles (keyed `COP30_S3_N##_E###.tif`, one per 1°×1° grid cell,
+    reused across every river whose bbox falls in it).
+  - `data/processed/catchments.json` (2026-09-11) — `valley catchments
+    precompute`'s output for the Garonne root: 50 DEM-delineated catchments
+    (rivers the WFS dump doesn't cover, area 5–150 km²), keyed by river id.
+    Not yet consumed by `make site` — see the 2026-09-11 entry above.
 - **Code**: `hydro/network.py` (tronçon → DiGraph), `hydro/trace.py` (pour-point
   upstream trace), `hydro/rivers.py` (roll up to `RiverNetwork`), `watershed.py`
   (`catchment_polygon` dissolve), `app.py` (Streamlit navigator, pydeck +
   static matplotlib map), `dump.py`, `sources/wfs.py`. 50 tests pass.
+  **Plus (2026-09-11, not reflected in the count above)**: `hydro/dem.py`
+  (`fetch_dem`/`fetch_dem_s3`/`condition`/`trace`/`delineate`), `valley.py`
+  (`delineate_river`, `dem_source` dispatch), `catalog.py` (`dem_catchments`
+  fallback, `polygon_to_rings`), `cli.py` (`valley catchments precompute`).
+  124 tests pass as of that commit (`a471fec`).
 - The wider re-dump fixed the false-root problem: **la Neste** went 30.2 km /
   root → **158.2 km flowing into la Garonne**, and its polygon over-reach dropped
   from 0.34° to 0.009°.
