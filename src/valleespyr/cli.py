@@ -1039,6 +1039,109 @@ def valley_catchments_precompute(
         click.echo(f"stopped early: {stopped_early}", err=True)
 
 
+@valley_catchments.command("terrain-precompute")
+@click.argument("catchments_path", type=click.Path(dir_okay=False, exists=True))
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option(
+    "--dem-dir",
+    type=click.Path(file_okay=False),
+    default="data/raw/dem",
+    show_default=True,
+    help="Cached DEM tiles (shared with 'catchments precompute').",
+)
+@click.option(
+    "--dem-source",
+    type=click.Choice(["s3", "opentopography"]),
+    default="s3",
+    show_default=True,
+)
+@click.option("--demtype", default="COP30", show_default=True)
+@click.option(
+    "--exaggeration",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Vertical exaggeration baked into the terrain (1.0 = true scale).",
+)
+@click.option(
+    "--basemap",
+    is_flag=True,
+    help="Also bake the IGN Plan raster onto each terrain's grid (draped instead of "
+    "the flat hypsometric tint). Needs network access at bake time; a river the "
+    "WMTS fetch fails for just falls back to the tint, the batch doesn't stop.",
+)
+@click.option(
+    "--basemap-tile-dir",
+    type=click.Path(file_okay=False),
+    default="data/raw/basemap_tiles",
+    show_default=True,
+    help="Cache individual WMTS tiles here, shared across nearby rivers.",
+)
+@click.option(
+    "-o",
+    "--out-dir",
+    "out_dir",
+    type=click.Path(file_okay=False),
+    default="data/processed/terrain",
+    show_default=True,
+    help="One <river_id>.json per river, for the catalog's 3D view to fetch lazily.",
+)
+@click.pass_context
+def valley_catchments_terrain_precompute(
+    ctx: click.Context,
+    catchments_path: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    dem_dir: str,
+    dem_source: str,
+    demtype: str,
+    exaggeration: float,
+    basemap: bool,
+    basemap_tile_dir: str,
+    out_dir: str,
+) -> None:
+    """Bake a 3D terrain file (heightmap + streams + contours) per river.
+
+    CATCHMENTS_PATH is the output of ``valley catchments precompute`` - every
+    river in its ``"rivers"`` dict with ``"source": "dem"`` gets a
+    ``<out_dir>/<river_id>.json`` terrain file, re-delineating from the DEM
+    to recover the polygon (the precompute output doesn't keep it, only the
+    catchment). See ``valleespyr.render.catalog_html``'s 3D view, which
+    fetches these lazily by river id on selection.
+
+    Safe to re-run: a river whose output file already exists is skipped.
+    """
+    from pathlib import Path
+
+    from .render.terrain_precompute import precompute_terrain
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+    catchments = json.loads(Path(catchments_path).read_text("utf-8"))
+    river_ids = [
+        rid for rid, entry in catchments.get("rivers", {}).items()
+        if entry.get("source") == "dem"
+    ]
+    if not river_ids:
+        raise click.ClickException(f"no DEM-sourced rivers found in {catchments_path}")
+
+    click.echo(f"{len(river_ids)} river(s) with a DEM catchment to consider", err=True)
+    summary = precompute_terrain(
+        rn, river_ids, Path(out_dir),
+        dem_dir=Path(dem_dir), demtype=demtype, dem_source=dem_source,
+        z_exaggeration=exaggeration,
+        basemap=basemap, basemap_tile_dir=Path(basemap_tile_dir),
+    )
+    click.echo(
+        f"terrain: {len(summary['done'])} baked, {len(summary['skipped'])} skipped "
+        f"(cached or undetermined), {len(summary['failed'])} failed",
+        err=True,
+    )
+    for rid, reason in summary["failed"].items():
+        click.echo(f"  failed {rid}: {reason}", err=True)
+    click.echo(f"wrote {out_dir}/", err=True)
+
+
 @valley.command("render")
 @click.argument("query")
 @click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
@@ -1366,6 +1469,16 @@ def valley_plate(
     "gets a click-to-draw mini-map of the selected river's network.",
 )
 @click.option(
+    "--terrain-dir",
+    "terrain_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Output of `valley catchments terrain-precompute` — turns the map column "
+    "into a 3D scene that fetches <river_id>.json from here (relative to "
+    "--html's directory) on selection. Implies --geo. A river with no terrain "
+    "file there falls back to a flat footprint.",
+)
+@click.option(
     "-o", "--output", default=None, help="Write the catalog JSON here (default: stdout)."
 )
 @click.option(
@@ -1384,6 +1497,7 @@ def catalog_cmd(
     dem_catchments_path: str | None,
     max_depth: int | None,
     geo: bool,
+    terrain_dir: str | None,
     output: str | None,
     html_output: str | None,
 ) -> None:
@@ -1399,8 +1513,13 @@ def catalog_cmd(
     masked to the river's own catchment where ``--bassins`` (or
     ``--dem-catchments`` filling the gap) has one.
     """
+    from pathlib import Path
+
     from .catalog import build_catalog
     from .render.catalog_html import render_catalog_html
+
+    if terrain_dir:
+        geo = True
 
     rn = _load_river_network(ctx, from_file, bbox_s)
 
@@ -1436,7 +1555,13 @@ def catalog_cmd(
     )
     _dump(catalog, output)
     if html_output:
-        render_catalog_html(catalog, html_output)
+        terrain_url = None
+        if terrain_dir:
+            import os
+
+            html_dir = Path(html_output).resolve().parent
+            terrain_url = os.path.relpath(Path(terrain_dir).resolve(), html_dir)
+        render_catalog_html(catalog, html_output, terrain_url=terrain_url)
         click.echo(f"wrote {html_output}", err=True)
 
 

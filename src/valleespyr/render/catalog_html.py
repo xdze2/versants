@@ -120,6 +120,24 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 }}
 #map {{ display: block; width: 100%; height: {map_h}px; background: #dde3e7; }}
 #map .leaflet-container {{ font: inherit; background: #dde3e7; }}
+#map3d {{
+  position: relative; width: 100%; height: {map_h}px; background: #eae4d6;
+  overflow: hidden;
+}}
+#cv3d {{ display: block; width: 100%; height: 100%; }}
+#loading3d {{
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; background: #eae4d6; color: #8a8068; font-size: 12.5px;
+}}
+#loading3d[hidden] {{ display: none; }}
+#map3d .tip3d {{
+  position: absolute; right: 10px; bottom: 8px; font-size: 10.5px; color: #8a8068;
+  opacity: .75; pointer-events: none;
+}}
+#map3d .compass3d {{
+  position: absolute; left: 10px; top: 10px; width: 44px; height: 44px;
+  pointer-events: none;
+}}
 .maplayers {{
   display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
   padding: 7px 10px; border-bottom: 1px solid var(--line);
@@ -168,9 +186,15 @@ mark {{ background: #ffe9a8; color: inherit; }}
 _STATIC_DIR = Path(__file__).parent / "static"
 _JS = (_STATIC_DIR / "catalog_graph.js").read_text(encoding="utf-8")
 _JS_GEO = (_STATIC_DIR / "catalog_map.js").read_text(encoding="utf-8")
+_JS_GEO_3D = (_STATIC_DIR / "catalog_3d.js").read_text(encoding="utf-8")
 
 
-def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) -> str:
+def catalog_to_html(
+    catalog: dict[str, Any],
+    *,
+    max_depth: int | None = None,
+    terrain_url: str | None = None,
+) -> str:
     """Return the self-contained two-level river selector HTML document.
 
     The document ships the catalog JSON plus a script that renders the local
@@ -178,13 +202,22 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
     its sub-rivers) and re-renders on every click. ``max_depth`` is accepted
     for API compatibility but no longer changes the initial render — the
     view only ever shows two levels regardless of tree depth.
+
+    ``terrain_url`` (a directory path or URL, relative to the HTML file — see
+    ``valleespyr catalog --terrain-dir``) switches the map column from the
+    Leaflet 2D map to a three.js 3D scene: the selected river's real DEM
+    terrain (:mod:`valleespyr.render.terrain_precompute`'s output,
+    ``<terrain_url>/<river_id>.json``) fetched lazily on click, with every
+    other river in view as a flat footprint at its true position. A river
+    with no terrain file there falls back to a flat highlighted footprint.
     """
     meta = catalog.get("meta", {})
     title = meta.get("root_name") or meta.get("root_id") or "valley catalog"
 
     has_geo = bool(catalog.get("geo") and catalog["geo"].get("rivers"))
+    use_3d = has_geo and terrain_url is not None
 
-    if has_geo:
+    if has_geo and not use_3d:
         map_w_css = f"clamp({MAP_MIN}px, 60vw, {MAP_MAX_VW}vw)"
         rest_cols = f"minmax(160px, 1fr) {map_w_css}"
         map_col = (
@@ -196,6 +229,18 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
             f'<label><input type="checkbox" id="maphillshade"> relief shading</label>'
             f"</div>"
             f'<div id="map" aria-label="selected river network"></div>'
+            f'<div id="infobox" class="infobox"><span class="hint">click a river…</span></div>'
+            f"</div></div>"
+        )
+    elif use_3d:
+        map_w_css = f"clamp({MAP_MIN}px, 60vw, {MAP_MAX_VW}vw)"
+        rest_cols = f"minmax(160px, 1fr) {map_w_css}"
+        map_col = (
+            f'<div class="mapcol"><div class="mapcard">'
+            f'<div id="map3d" aria-label="selected river in 3D">'
+            f'<canvas id="cv3d"></canvas>'
+            f'<div id="loading3d">loading terrain…</div>'
+            f"</div>"
             f'<div id="infobox" class="infobox"><span class="hint">click a river…</span></div>'
             f"</div></div>"
         )
@@ -228,21 +273,29 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
     js = _JS.replace("__GEOM__", json.dumps(geom)).replace(
         "__ORDER_STYLE__", json.dumps(_ORDER_STYLE)
     )
-    # _JS_GEO must run first: it defines window._catalogInitGeo, which the
-    # base script's IIFE calls (synchronously, at its own end) once it exists.
-    if has_geo:
+    # The geo script must run first: it defines window._catalogInitGeo, which
+    # the base script's IIFE calls (synchronously, at its own end) once it exists.
+    if use_3d:
+        js = _JS_GEO_3D.replace("__TERRAIN_URL__", json.dumps(terrain_url)) + js
+    elif has_geo:
         js = _JS_GEO + js
 
     payload = json.dumps(catalog, ensure_ascii=False).replace("<", "\\u003c")
 
-    leaflet_head = (
-        f'<link rel="stylesheet" '
-        f'href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.min.css">'
-        f'<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.js">'
-        f"</script>"
-        if has_geo
-        else ""
-    )
+    if use_3d:
+        leaflet_head = (
+            '<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.159.0/three.min.js">'
+            "</script>"
+        )
+    elif has_geo:
+        leaflet_head = (
+            f'<link rel="stylesheet" '
+            f'href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.min.css">'
+            f'<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.js">'
+            f"</script>"
+        )
+    else:
+        leaflet_head = ""
 
     return f"""<!doctype html>
 <html lang="en">
@@ -279,12 +332,19 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
 
 
 def render_catalog_html(
-    catalog: dict[str, Any], path: str | Path, *, max_depth: int | None = None
+    catalog: dict[str, Any],
+    path: str | Path,
+    *,
+    max_depth: int | None = None,
+    terrain_url: str | None = None,
 ) -> Path:
     """Write the catalog as a self-contained two-level river selector HTML file; return the path."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(catalog_to_html(catalog, max_depth=max_depth), encoding="utf-8")
+    path.write_text(
+        catalog_to_html(catalog, max_depth=max_depth, terrain_url=terrain_url),
+        encoding="utf-8",
+    )
     return path
 
 
