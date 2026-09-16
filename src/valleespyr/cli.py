@@ -9,6 +9,7 @@ from typing import Any
 import click
 
 from . import watershed as ws
+from .config import DEFAULT_CONFIG_PATH, load_study_area_if_present
 from .dump import dump_layer
 from .sources.wfs import GEOPLATEFORME_WFS, LAYER_BASSIN_VERSANT, WFSClient, WFSError
 
@@ -17,6 +18,13 @@ TRONCON_BBOX_HELP = (
 )
 
 BBOX_HELP = "Bounding box as 'minx,miny,maxx,maxy' (lon/lat WGS84 unless --bbox-crs given)."
+
+# config/study_area.yaml, if present in the current directory, supplies the
+# defaults below (WFS endpoint, dump bbox/layers) — falling back to the
+# built-in constants when there's no study area config (e.g. running outside
+# this project's repo). Read once at import time: these are option
+# *defaults*, always overridable by an explicit flag.
+_STUDY_AREA = load_study_area_if_present(DEFAULT_CONFIG_PATH)
 
 
 def _parse_bbox(value: str) -> tuple[float, float, float, float]:
@@ -43,10 +51,11 @@ def _dump(obj, path: str | None) -> None:
 @click.version_option(package_name="valleespyr")
 @click.option(
     "--wfs-endpoint",
-    default=GEOPLATEFORME_WFS,
+    default=_STUDY_AREA.wfs_endpoint if _STUDY_AREA else GEOPLATEFORME_WFS,
     show_default=True,
     envvar="VALLEESPYR_WFS_ENDPOINT",
-    help="WFS 2.0 base URL (IGN Géoplateforme by default; Sandre also works).",
+    help="WFS 2.0 base URL (defaults from config/study_area.yaml if present, "
+    "else IGN Géoplateforme; Sandre also works).",
 )
 @click.option("--timeout", default=60.0, show_default=True, help="HTTP timeout in seconds.")
 @click.pass_context
@@ -160,10 +169,21 @@ def wfs_watersheds(
 
 @wfs.command("dump")
 @click.option("--layer", default=LAYER_BASSIN_VERSANT, show_default=True)
-@click.option("--bbox", "bbox_s", default=None, help=BBOX_HELP)
+@click.option(
+    "--bbox",
+    "bbox_s",
+    default=None,
+    show_default=f"study area bbox {_STUDY_AREA.bbox_str}" if _STUDY_AREA else False,
+    help=BBOX_HELP + " Defaults from config/study_area.yaml if present and --cql not given.",
+)
 @click.option("--bbox-crs", default="EPSG:4326", show_default=True)
 @click.option("--cql", default=None, help="CQL filter (mutually exclusive with --bbox).")
-@click.option("--srs", default="EPSG:4326", show_default=True, help="Output CRS (e.g. EPSG:2154).")
+@click.option(
+    "--srs",
+    default=_STUDY_AREA.crs if _STUDY_AREA else "EPSG:4326",
+    show_default=True,
+    help="Output CRS (defaults from config/study_area.yaml if present, else WGS84).",
+)
 @click.option("--page-size", default=1000, show_default=True, help="Features per WFS request.")
 @click.option("--max-features", type=int, default=None, help="Stop after this many features.")
 @click.option(
@@ -186,12 +206,17 @@ def wfs_dump(
 ) -> None:
     """Bulk-download a whole layer (paged) to GeoJSON / GeoParquet / GeoPackage.
 
-    With no --bbox and no --cql, downloads the entire layer. The watershed layer
-    is ~6.6k features for all of metropolitan France, so that is quick.
+    With no --bbox and no --cql, downloads the whole layer bounded by
+    config/study_area.yaml's bbox if that file is present, else the entire
+    layer with no bound at all — the watershed layer is ~6.6k features for
+    all of metropolitan France, so that is still quick. Pass --bbox
+    explicitly (or --cql) to override the study area default.
     """
     client: WFSClient = ctx.obj["client"]
     if bbox_s is not None and cql is not None:
         raise click.UsageError("provide at most one of --bbox or --cql")
+    if bbox_s is None and cql is None and _STUDY_AREA is not None:
+        bbox_s = _STUDY_AREA.bbox_str
     bbox = _parse_bbox(bbox_s) if bbox_s else None
 
     def _progress(n: int, total: int | None) -> None:

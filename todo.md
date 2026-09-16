@@ -44,9 +44,20 @@ nothing reads it yet — `TRONCONS`/`BASSINS`/`ROOT` are still hardcoded
 Makefile variables, and `--bbox` is a per-invocation CLI flag with no config
 backing.
 
-- [ ] Add a small loader (`valleespyr/config.py`?) that parses
+- [x] Add a small loader (`valleespyr/config.py`?) that parses
       `study_area.yaml` into the bbox/CRS/sources values already threaded
       through `dump.py`/`cli.py` as explicit params.
+      (Added `valleespyr/config.py::load_study_area` /
+      `load_study_area_if_present` — a `StudyArea` dataclass with
+      `bbox_wgs84`/`bbox_str`/`crs`/`wfs_endpoint`/`troncon_layer`/
+      `watershed_layer`/`roots`. Wired into `cli.py`: the top-level
+      `--wfs-endpoint` and `wfs dump`'s `--bbox`/`--srs` now default from
+      `config/study_area.yaml` when present in the cwd, still overridable by
+      an explicit flag; `--cql` on `wfs dump` still works unbounded since the
+      bbox default is only applied when neither `--bbox` nor `--cql` was
+      passed. `dump.py`/`hydro`/`valley`/`catalog` commands are unchanged —
+      they take a local `--from-file`, not the live WFS, so nothing to
+      default there. Tests in `tests/test_config.py`.)
 - [ ] Resolve the `roots` list's `cours_d_eau_id: null` placeholders (la
       Garonne, l'Agout) to real ids — needed before they're usable as CLI
       `catalog <root>` arguments.
