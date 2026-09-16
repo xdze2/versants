@@ -555,27 +555,6 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
 
     function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
 
-    (function loop() {
-      requestAnimationFrame(loop);
-      const now = performance.now();
-      if (flightT < 1) {
-        flightT = Math.min(1, (now - flightStart) / FLIGHT_MS);
-        const k = easeInOut(flightT);
-        camPos.lerpVectors(flightFrom.pos, flightTo.pos, k);
-        camTarget.lerpVectors(flightFrom.target, flightTo.target, k);
-      }
-      const offset = camPos.clone().sub(camTarget);
-      const baseR = Math.hypot(offset.x, offset.z);
-      const baseAz = Math.atan2(offset.z, offset.x);
-      const r = baseR * orbitDist;
-      const az = baseAz + orbitAz;
-      const y = offset.y * orbitDist + baseR * Math.sin(orbitEl) * orbitDist;
-      camera.position.set(camTarget.x + r * Math.cos(az), camTarget.y + y, camTarget.z + r * Math.sin(az));
-      camera.lookAt(camTarget);
-      renderer.render(scene, camera);
-      updateCompass();
-    })();
-
     const tip = document.createElement('div');
     tip.className = 'tip3d';
     tip.textContent = 'drag to orbit · scroll to zoom';
@@ -587,6 +566,10 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     // latitude to decreasing z) through the camera's actual view+projection
     // each frame: the on-screen direction from camTarget to one step north
     // of it gives the needle heading directly, valid at any orbit/tilt.
+    //
+    // Declared (and updateCompass defined) before the render loop below,
+    // which calls updateCompass() on its very first frame - a const inside a
+    // later-declared block would still be in its temporal dead zone then.
     const compass = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     compass.setAttribute('class', 'compass3d');
     compass.setAttribute('viewBox', '0 0 48 48');
@@ -610,6 +593,27 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       const deg = Math.atan2(dx, dy) * 180 / Math.PI;
       needle.setAttribute('transform', 'rotate(' + deg.toFixed(1) + ' 24 24)');
     }
+
+    (function loop() {
+      requestAnimationFrame(loop);
+      const now = performance.now();
+      if (flightT < 1) {
+        flightT = Math.min(1, (now - flightStart) / FLIGHT_MS);
+        const k = easeInOut(flightT);
+        camPos.lerpVectors(flightFrom.pos, flightTo.pos, k);
+        camTarget.lerpVectors(flightFrom.target, flightTo.target, k);
+      }
+      const offset = camPos.clone().sub(camTarget);
+      const baseR = Math.hypot(offset.x, offset.z);
+      const baseAz = Math.atan2(offset.z, offset.x);
+      const r = baseR * orbitDist;
+      const az = baseAz + orbitAz;
+      const y = offset.y * orbitDist + baseR * Math.sin(orbitEl) * orbitDist;
+      camera.position.set(camTarget.x + r * Math.cos(az), camTarget.y + y, camTarget.z + r * Math.sin(az));
+      camera.lookAt(camTarget);
+      renderer.render(scene, camera);
+      updateCompass();
+    })();
 
     if (geo.rivers[meta.root_id]) focusOn(meta.root_id);
   })();
