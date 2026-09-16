@@ -181,6 +181,7 @@ mark { background: #ffe9a8; color: inherit; }
     let maskLayer = null;
     const ctxPane = L.featureGroup().addTo(map);
     const hiPane = L.featureGroup().addTo(map);
+    const previewPane = L.featureGroup().addTo(map);
 
     function toLatLngs(subs) {
       return subs.map(sub => sub.map(([lon, lat]) => [lat, lon]));
@@ -234,6 +235,7 @@ mark { background: #ffe9a8; color: inherit; }
       if (!g) return;
       currentId = id;
       hiPane.clearLayers();
+      previewPane.clearLayers();
       paintMask(id);
       for (const uid of up[id] || []) {
         const ug = geo.rivers[uid];
@@ -290,6 +292,26 @@ mark { background: #ffe9a8; color: inherit; }
     }
     window._catalogGeoSync = syncSelectedRow;
     window._catalogMapSelect = paintMap;
+
+    // hover preview: draw a river on top of the current selection without
+    // touching the mask, the map view, or the infobox — pure "show me where
+    // this is" feedback while the mouse is over a row.
+    function previewRiver(id) {
+      previewPane.clearLayers();
+      if (!id || id === currentId) return;
+      const g = geo.rivers[id];
+      if (!g) return;
+      L.polyline(toLatLngs(g.line), {
+        color: '#c96a1f', weight: mapWidth((node[id] || {}).strahler, 1.7),
+        opacity: 0.95, lineCap: 'round', lineJoin: 'round',
+      }).addTo(previewPane);
+      L.circleMarker([g.outlet[1], g.outlet[0]], {
+        radius: 4.5, color: '#fff', weight: 1, fillColor: '#c96a1f', fillOpacity: 1,
+      }).addTo(previewPane);
+    }
+    function clearPreview() { previewPane.clearLayers(); }
+    window._catalogMapPreview = previewRiver;
+    window._catalogMapPreviewClear = clearPreview;
 
     // --- layer switcher UI: basemap radios + hillshade toggle -----------
     const baseRadios = document.querySelectorAll('input[name="maplayer"]');
@@ -551,6 +573,22 @@ mark { background: #ffe9a8; color: inherit; }
   labelsEl.addEventListener('click', ev => {
     const li = ev.target.closest('.row[data-id]');
     if (li && li.dataset.id && nodeById[li.dataset.id]) focusOn(li.dataset.id);
+  });
+
+  // hover: preview the row's river on the map without changing the view.
+  // mouseover/mouseout (not mouseenter/mouseleave) so delegation works.
+  labelsEl.addEventListener('mouseover', ev => {
+    const li = ev.target.closest('.row[data-id]');
+    if (li && li.dataset.id && nodeById[li.dataset.id] && window._catalogMapPreview) {
+      window._catalogMapPreview(li.dataset.id);
+    }
+  });
+  labelsEl.addEventListener('mouseout', ev => {
+    const li = ev.target.closest('.row[data-id]');
+    if (!li) return;
+    const to = ev.relatedTarget && ev.relatedTarget.closest && ev.relatedTarget.closest('.row[data-id]');
+    if (to === li) return;
+    if (window._catalogMapPreviewClear) window._catalogMapPreviewClear();
   });
 
   // --- name filter (hides rows) ------------------------------------------
