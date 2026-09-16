@@ -99,22 +99,32 @@ terrain: $(DEM_CATCHMENTS)
 	  -o "$(TERRAIN_DIR)"
 	@echo "baked $(TERRAIN_DIR)/"
 
-# Skips the rebuild when docs/index.html already looks up to date — `site`
-# itself stays .PHONY (always rebuilds on direct request), but re-running
-# `make preview` repeatedly (the common case: tweak, look, tweak, look)
-# shouldn't re-walk the whole tronçon network each time. "Up to date" means
-# newer than the raw data, the study-area config, and the renderer's own
-# source (Python + the static JS/CSS it inlines) — anything narrower risks a
-# silently stale preview after an unrelated code change.
+# Skips the rebuild when every root's docs/**/index.html already looks up to
+# date — `site` itself stays .PHONY (always rebuilds on direct request), but
+# re-running `make preview` repeatedly (the common case: tweak, look, tweak,
+# look) shouldn't re-walk the whole tronçon network each time. "Up to date"
+# means newer than the raw data, the study-area config, and the renderer's
+# own source (Python + the static JS/CSS it inlines) — anything narrower
+# risks a silently stale preview after an unrelated code change. Checked
+# against *every* resolved root's index.html (docs/index.html plus
+# docs/<slug>/index.html for each other root), not just the front page — a
+# root's page rebuilds every time `site` runs, but was previously never
+# rechecked here, so a change touching only a non-front-page root looked
+# up to date forever.
 PREVIEW_DEPS := $(TRONCONS) $(STUDY_AREA) \
   $(wildcard src/valleespyr/render/*.py src/valleespyr/render/static/*.js \
              src/valleespyr/*.py src/valleespyr/hydro/*.py)
-preview: docs/index.html
+PREVIEW_PAGES := $(shell uv run python3 -c \
+	  "from valleespyr.config import load_study_area; \
+	  roots = load_study_area('$(STUDY_AREA)').resolved_roots(); \
+	  print(' '.join(['docs/index.html'] + ['docs/' + r.slug + '/index.html' for r in roots[1:]]))" \
+	  2>/dev/null || echo docs/index.html)
+preview: $(PREVIEW_PAGES)
 	@echo "== serving docs/ at http://localhost:8000  (Ctrl-C to stop)"
 	@echo "note: each page fetches its own catalog_index.json — open via this server, not file://"
 	cd docs && python3 -m http.server 8000
 
-docs/index.html: $(PREVIEW_DEPS)
+$(PREVIEW_PAGES) &: $(PREVIEW_DEPS)
 	$(MAKE) --no-print-directory site
 
 clean:

@@ -75,6 +75,7 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
       ctxLines[id] = line;
       line.on('mouseover', () => { if (window._catalogRowPreview) window._catalogRowPreview(id); });
       line.on('mouseout', () => { if (window._catalogRowPreview) window._catalogRowPreview(null); });
+      line.on('click', () => focusOn(id));
     }
 
     const cap = document.getElementById('infobox');

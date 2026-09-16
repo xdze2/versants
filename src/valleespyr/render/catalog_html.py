@@ -12,10 +12,10 @@ When the catalog carries a ``geo`` block (``valleespyr catalog --geo``) a
 second column holds a sticky Leaflet map: an IGN topo or OpenStreetMap
 basemap (with an optional IGN relief-shading overlay), both fetched live from
 public tile servers — this is the one part of the page that needs network
-access. Clicking a row draws just that river and its upstream network on top
-as styled polylines, fit to frame. Each line's stroke width scales with the
-river's Strahler order, with the selected river and its network drawn
-heavier than the faint catchment context.
+access. Clicking a row (or a river's line on the map itself) draws just that
+river and its upstream network on top as styled polylines, fit to frame. Each
+line's stroke width scales with the river's Strahler order, with the selected
+river and its network drawn heavier than the faint catchment context.
 
 ``render_catalog_html(catalog, path)`` writes the file; ``catalog_to_html`` gives
 the string.
@@ -258,7 +258,7 @@ def catalog_to_html(
         f"the river network: the selected river, its downstream link, its "
         f"neighbours, and its sub-rivers"
         f'<span id="meta-extra"></span>'
-        + (" · click a row to select it" if has_geo else " · click a row to re-center")
+        + (" · click a row or the map to select it" if has_geo else " · click a row to re-center")
     )
 
     lane_w = LANE_PAD + N_LANES * LANE_W

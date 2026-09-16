@@ -181,6 +181,39 @@ otherwise it's rework.
       revisit only once the above UI shape has stopped changing. Don't
       start a Svelte migration before this list's items are otherwise done.
 
+## 3b. Bugs found in review, now fixed
+
+- [x] `make preview`'s staleness check only watched `docs/index.html`, but
+      `make site` (which it calls when stale) builds one page per root —
+      `docs/index.html` plus `docs/<slug>/index.html` for every other root.
+      A change touching only a non-front-page root (e.g. l'Adour) looked
+      "up to date" forever and `make preview` silently kept serving a stale
+      or missing secondary-root page.
+      (Fixed: `PREVIEW_PAGES` now resolves every root's output path from
+      `study_area.yaml` via the same `load_study_area(...).resolved_roots()`
+      call `site` already uses, and both `preview`'s prerequisite and the
+      rebuild rule (`$(PREVIEW_PAGES) &: $(PREVIEW_DEPS)`, a grouped-target
+      rule — needs GNU Make ≥ 4.3) target the whole list instead of just
+      `docs/index.html`. Verified: touching `config/study_area.yaml` after
+      freshening only `docs/index.html` now correctly triggers a rebuild
+      that previously would have been skipped.)
+- [x] The 2D Leaflet map (`catalog_map.js`) wired hover-preview on every
+      river polyline but never click-to-select, unlike the 3D view
+      (`catalog_3d.js`), which already calls `focusOn(id)` on a footprint
+      click — an inconsistency between the two map backends for the same
+      interaction (`app_requirements.md`'s tree-first design intent means
+      neither backend is *required* to support map clicks, but having only
+      one of the two do so was an unintended asymmetry, not a choice).
+      (Fixed: added `line.on('click', () => focusOn(id))` next to the
+      existing hover handlers in `catalog_map.js`; updated the module
+      docstring and the on-page hint text ("click a row or the map to
+      select it") to match. Verified with a scripted Chrome session:
+      selected a leaf river from the tree first (so the highlight pane
+      only covers a sliver of the map, leaving other rivers' lines
+      actually clickable), then clicked a distinct context river's line —
+      confirmed the tree selection, URL hash, and infobox all updated to
+      match, same as a tree-row click.)
+
 ## 4. Full-Pyrenees / multi-root batch run
 
 Currently only one root (`ROOT ?= COURDEAU...` for Neste de Rioumajou) has
