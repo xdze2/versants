@@ -90,6 +90,38 @@ _VALLEY_AREA_MAX_KM2 = 150.0
 _CATCHMENT_MAX_VERTICES = 60
 
 
+def _never_gets_catchment(
+    rn: RiverNetwork,
+    river_id: str,
+    *,
+    bassins: gpd.GeoDataFrame | None,
+    dem_catchments: dict[str, Any] | None,
+) -> bool:
+    """True if ``river_id`` is a leaf confirmed to never get its own catchment.
+
+    A leaf (no rivers upstream of it) whose ``dem_catchments`` entry is
+    ``"discarded"`` (measured, outside the "reads as one valley" area range)
+    or ``"undetermined"`` (DEM pour-point search never found a confident
+    channel — almost always a torrent too short/steep for COP30 to resolve)
+    is noise in the browsable tree: a leaf row a viewer can click into but
+    that shows no bounded valley, ever. Folded into its parent instead, same
+    as an unnamed/nameless reach already folds in :mod:`valleespyr.hydro.rivers`.
+
+    A river the batch never attempted (no entry at all — added to the network
+    after the last precompute run, or out of its scope) is left alone: its
+    fate is unknown, not confirmed absent. Same for anything with rivers
+    upstream of it — folding those away would hide real valleys further up.
+    """
+    if dem_catchments is None or rn.upstream_rivers(river_id):
+        return False
+    if bassins is not None:
+        area, _ = _area_for_river(rn, river_id, bassins)
+        if area is not None:
+            return False
+    entry = dem_catchments.get(river_id)
+    return entry is not None and entry.get("source") in ("discarded", "undetermined")
+
+
 def build_catalog(
     rn: RiverNetwork,
     root_query: str,
@@ -146,6 +178,23 @@ def build_catalog(
 
         mainline_id, trib_ids = _partition_children(rn, river.id)
 
+        def keep(cid: str) -> bool:
+            return not _never_gets_catchment(
+                rn, cid, bassins=bassins, dem_catchments=dem_catchments
+            )
+
+        n_folded = 0
+        if mainline_id is not None and not keep(mainline_id):
+            n_folded += 1
+            mainline_id = None
+        kept_tribs = []
+        for t in trib_ids:
+            if keep(t):
+                kept_tribs.append(t)
+            else:
+                n_folded += 1
+        trib_ids = kept_tribs
+
         node: dict[str, Any] = {
             "id": river.id,
             "name": river.name,
@@ -153,6 +202,7 @@ def build_catalog(
             "strahler": river.max_order,
             "n_upstream": len(rn.upstream_rivers(river.id)),
             "n_tributaries": len(trib_ids),
+            "n_folded": n_folded,
             "depth": depth,
             "pfafstetter": pfaf.get(river.id),
             "is_headwater": mainline_id is None and not trib_ids,
