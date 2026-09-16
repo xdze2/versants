@@ -9,8 +9,8 @@ and the pipeline that turns raw data into the published static site.
 ```
                      OFFLINE (Python CLI, run by a contributor / CI)
 ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│ IGN BD TOPO  │──▶│ river graph  │──▶│ drainage tree│──▶│ catalog.json │
-│ (WFS/dump)   │   │ (networkx)   │   │ (JSON, main- │   │ + index.html │
+│ IGN BD TOPO  │──▶│ river graph  │──▶│ drainage tree│──▶│catalog_index │
+│ (WFS/dump)   │   │ (networkx)   │   │ (JSON, main- │   │   .json      │
 └──────────────┘   └──────────────┘   │  line/tribs) │   └──────────────┘
                                        └──────────────┘          │
 ┌──────────────┐   ┌──────────────┐   ┌──────────────┐          │
@@ -40,13 +40,30 @@ The browser only ever reads static JSON/HTML/JS and draws.
 | River topology               | `networkx.DiGraph`                       | Graph is the natural structure; upstream/downstream walks are graph traversals. |
 | Vector geo data               | `geopandas` / `shapely`                  | Reading WFS/GeoParquet, dissolving polygons, geometry ops. |
 | Raster / DEM                 | `rasterio` + `pysheds`                   | Standard hydrology raster stack; pysheds gives D8 flow routing + watershed delineation. |
-| Published output             | Static HTML + vanilla JS, no framework   | No backend requirement; a build step, not a running app — a JS framework buys nothing here. |
+| Published output             | Static HTML + vanilla JS, no framework   | No backend requirement; a build step, not a running app. Revisit once the UI spec (tree/map/3D shell) has stopped moving — see "Open question" below. |
 | 2D map                       | Leaflet + IGN/OSM tile layers            | Lightweight, no API key needed for the basemap tiles used. |
 | 3D terrain view               | three.js (from CDN at view time)         | Only mainstream option for in-browser WebGL with no plugins. |
 | Site hosting                  | GitHub Pages, serving `docs/`            | Free, static, matches "no backend" requirement. |
 
-No JS build step (bundler/transpiler) — the published page is authored
-JS/CSS directly, so "view source" on the output is the actual code.
+No JS build step (bundler/transpiler) for now — the published page is
+authored JS/CSS directly, so "view source" on the output is the actual code.
+"Static site" is the actual hard requirement, not "no build step" — a
+compiled framework output is still static files, so this is a choice to
+revisit deliberately, not a constraint (see "Open question" below).
+
+**Open question — Svelte for the interactive shell.** The tree
+selector/map/3D-panel UI is stateful enough (re-centering on selection,
+URL sync, swapping map for 3D view) that a component framework like Svelte
+would remove a fair amount of hand-rolled reactivity, at the cost of adding
+a compile step to the offline pipeline (cheap — it's one more Makefile
+stage alongside the existing Python CLI steps) and losing "view source on
+the output is the authored code." Deliberately deferred rather than decided:
+the UI shape is still being designed (lane layout, hover-preview, filter
+box), and re-platforming a settled small vanilla shell later is a bounded
+job, while re-platforming mid-design means doing the design twice. Decide
+this once the UI spec in `app_requirements.md` has stopped moving. If
+adopted, scope it to the interactive shell only — catalog data stays
+framework-agnostic JSON the shell fetches, so the choice stays swappable.
 
 ## Data sources
 
@@ -310,8 +327,14 @@ Stages, each independently re-runnable and cacheable:
 5. **Catalog build**: walk the river graph from the chosen root into the
    mainline/tributary JSON tree (§3 above), folding in catchment polygons (for map
    masking) and the set of rivers with baked terrain (so the UI knows which
-   selections can offer a 3D view). Render to one self-contained
-   `index.html` plus the per-river `terrain.json` files it lazy-loads.
+   selections can offer a 3D view). Write `catalog_index.json` — the whole
+   tree/map data for the study area, everything the UI needs to render the
+   selector, map, and facts panel with no per-click fetch. `index.html` is a
+   thin static shell (markup/CSS/JS only, no baked-in data) that fetches
+   `catalog_index.json` on load and the relevant per-river `terrain.json`
+   lazily on selection. Keeping data out of the HTML means a data-only
+   rebuild changes `catalog_index.json` without touching the shell, and the
+   catalog is inspectable/diffable as plain JSON.
 6. **Publish**: commit the generated `docs/` (or the relevant subset — raw
    dumps and intermediate caches stay out of git) and let GitHub Pages serve
    it from the default branch.
@@ -319,6 +342,17 @@ Stages, each independently re-runnable and cacheable:
 A single entry point (e.g. a `Makefile` or equivalent task runner) should
 chain 2–6 given the stage-1 dump already present locally, so "rebuild the
 site" is one command once the raw data is on disk.
+
+**Study area config.** `config/study_area.yaml` is the intended source of
+truth for the study bbox (stage 1's dump extent) and the list of root rivers
+each get their own catalog build (stage 5). It is not wired into the CLI or
+the Makefile yet: today's `Makefile` hardcodes the equivalent information
+directly as `TRONCONS`/`BASSINS`/`ROOT` variables (a local dump path and a
+single resolved root id) — those variables are the pre-config-file stand-in
+for what `study_area.yaml` documents. Reading the YAML from `valleespyr
+catalog`/`valley catchments precompute` and from the Makefile, and driving a
+build per `roots` entry instead of one hardcoded `ROOT`, is future wiring,
+not yet implemented.
 
 ## Deliberately out of scope for this design
 

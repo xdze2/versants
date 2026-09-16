@@ -114,9 +114,13 @@ Per river, the UI should be able to show at minimum:
   server-side computation at view time.
 - **Self-contained enough to actually load fast.** The full river tree for a
   reasonably sized study area (e.g. the whole Garonne catchment, ~600
-  rivers) should load and render as one page without a per-click network
-  round trip for the tree/map data. Per-valley 3D terrain can be lazy-loaded
-  per selection (it's much heavier than the tree/map data).
+  rivers) should load and render as one page after a single fetch of the
+  catalog data on load — no per-click network round trip for the tree/map
+  data. (The data itself lives in a separate JSON file, not inlined in the
+  HTML — see [app_design.md](app_design.md); "no per-click round trip"
+  refers to interaction cost, not to how many files make up the page.)
+  Per-valley 3D terrain can be lazy-loaded per selection (it's much heavier
+  than the tree/map data).
 - **Offline-first data pipeline.** Fetching from public data sources
   (IGN, Copernicus) is a separate, explicit, re-runnable step from building
   the site — a contributor should be able to rebuild the published page from

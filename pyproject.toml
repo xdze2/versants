@@ -25,16 +25,6 @@ dem = [
     "pysheds>=0.4",
 ]
 render = ["rasterio>=1.3", "pysheds>=0.4", "matplotlib>=3.8", "pillow>=10.0"]
-plate = ["rasterio>=1.3", "pysheds>=0.4", "matplotlib>=3.8"]
-viz = [
-    "pydeck>=0.9",
-    "matplotlib>=3.8",
-]
-app = [
-    "streamlit>=1.30",
-    "pydeck>=0.9",
-    "matplotlib>=3.8",
-]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
@@ -42,9 +32,6 @@ dev = [
 
 [project.scripts]
 valleespyr = "valleespyr.cli:cli"
-
-[project.gui-scripts]
-valleespyr-app = "valleespyr.app:_run_streamlit"
 
 [build-system]
 requires = ["hatchling"]

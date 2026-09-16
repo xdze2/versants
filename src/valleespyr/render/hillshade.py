@@ -41,7 +41,7 @@ fine.
 Everything is ``numpy`` only (no rasterio / bpy); callers pass the DEM as a plain
 array plus its cell size in metres.
 
-Conventions, matching ``scripts/render_valley.py``:
+Conventions:
 
 * the DEM is ``(rows, cols)``, **row 0 = north**, column 0 = west;
 * sun azimuth is a compass bearing in degrees — 0 = from the north, 90 = from

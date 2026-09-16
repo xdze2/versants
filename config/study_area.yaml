@@ -1,0 +1,33 @@
+# Study area: bounds the data pull (WFS dump extent) and lists the root
+# rivers to build a catalog for. See app_design.md "Data sources" for how
+# the study area extent relates to what's actually shown (extent-bounded,
+# not elevation/relief-filtered).
+name: pyrenees-garonne
+description: >-
+  La Garonne catchment and the French Pyrenees it drains from — the bbox
+  fed to the WFS dump step, ahead of the river-graph / catalog build.
+
+# Covers the Garonne catchment (source in the central Pyrenees down through
+# Toulouse) plus the Pyrenean range generally, for future roots (e.g.
+# l'Agout, other Pyrenees-draining basins). Matches the extent implied by
+# the old dump's file name (troncon_hydrographique_pyrenees.parquet) and
+# the sample fixture's bbox (data/raw/troncon_hydrographique_gavarnie_sample,
+# a small corner of this area). Widen or split per-root if a single bbox
+# this large makes a WFS dump unwieldy.
+bbox_wgs84: [-1.5, 42.0, 3.5, 43.5]  # minx, miny, maxx, maxy (lon/lat)
+
+crs: EPSG:2154  # Lambert-93, working CRS
+
+sources:
+  wfs_endpoint: https://data.geopf.fr/wfs/ows
+  troncon_layer: BDTOPO_V3:troncon_hydrographique
+  watershed_layer: BDTOPO_V3:bassin_versant_topographique
+
+# Root rivers to build a catalog for (name or stable cours_d_eau id — prefer
+# id once known, since the Makefile's comment notes name-matching is
+# ambiguous). Each becomes one `valleespyr catalog <root>` build.
+roots:
+  - name: la Garonne
+    cours_d_eau_id: null  # fill in once resolved, same pattern as the Makefile's ROOT
+  - name: l'Agout
+    cours_d_eau_id: null

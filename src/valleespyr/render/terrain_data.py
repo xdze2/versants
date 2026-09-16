@@ -1,9 +1,8 @@
 """Clip a river catchment's DEM and stream network into a compact terrain payload.
 
-Shared by :mod:`valleespyr.render.diorama` (one standalone 3D HTML file) and
-:mod:`valleespyr.render.terrain_precompute` (a batch of small per-river JSON
-files for the catalog's 3D view): both need the same heightmap PNG + draped
-stream polylines + contour polylines, just packaged differently at the end.
+Used by :mod:`valleespyr.render.terrain_precompute` (a batch of small
+per-river JSON files for the catalog's 3D view): heightmap PNG + draped
+stream polylines + contour polylines.
 """
 
 from __future__ import annotations
@@ -295,10 +294,8 @@ def build_terrain_payload(
     """Clip, encode and return one river's terrain as a JSON-able dict.
 
     ``{"meta", "heightmap", "streams", "contours_minor", "contours_index"}`` -
-    everything a client needs to build the same solid terrain block
-    :func:`valleespyr.render.diorama.build_diorama` bakes into a standalone
-    HTML, minus the page chrome. Used by both that function and
-    :mod:`valleespyr.render.terrain_precompute` so the two stay in sync.
+    everything a client needs to build a solid terrain block. Used by
+    :mod:`valleespyr.render.terrain_precompute`.
 
     With ``basemap=True`` an ``"basemap"`` key is added: the IGN Plan raster
     (:func:`valleespyr.render.basemap.fetch_basemap_rgb`) resampled onto the
