@@ -24,14 +24,15 @@ database, no login — open the page and start exploring.
 
 ## What it looks like
 
-A two-level **git-graph-style selector**: the trunk river runs down the left
-as a lane, tributaries branch off it, and picking one re-centers the graph one
-level down. Next to it, a map traces the selected valley's course and
-catchment; picking a valley with a baked terrain model swaps that map for an
-interactive 3D relief block — heightmap, draped stream network, and a real
-IGN aerial/topo texture — built from open elevation and map data.
+A two-level **drainage-tree selector**: the trunk river runs down the left as
+a lane, tributaries branch off it (visually not unlike a commit graph), and
+picking one re-centers the view one level down. Next to it, a map traces the
+selected valley's course and catchment; picking a valley with a baked terrain
+model swaps that map for an interactive 3D relief block — heightmap, draped
+stream network, and a real IGN aerial/topo texture — built from open
+elevation and map data.
 
-![la Garonne — river git-graph selector](docs/images/garonne_catalog_html.png)
+![la Garonne — river drainage-tree selector](docs/images/garonne_catalog_html.png)
 
 ![Gave de Lutour — 3D terrain block, IGN basemap draped over a DEM heightmap](docs/images/lutour_3d_preview.png)
 

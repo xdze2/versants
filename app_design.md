@@ -9,9 +9,9 @@ and the pipeline that turns raw data into the published static site.
 ```
                      OFFLINE (Python CLI, run by a contributor / CI)
 ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-│ IGN BD TOPO  │──▶│ river graph  │──▶│ valley tree  │──▶│ catalog.json │
-│ (WFS/dump)   │   │ (networkx)   │   │ (JSON, git-  │   │ + index.html │
-└──────────────┘   └──────────────┘   │  graph shape)│   └──────────────┘
+│ IGN BD TOPO  │──▶│ river graph  │──▶│ drainage tree│──▶│ catalog.json │
+│ (WFS/dump)   │   │ (networkx)   │   │ (JSON, main- │   │ + index.html │
+└──────────────┘   └──────────────┘   │  line/tribs) │   └──────────────┘
                                        └──────────────┘          │
 ┌──────────────┐   ┌──────────────┐   ┌──────────────┐          │
 │ Copernicus   │──▶│ catchment    │──▶│ per-river    │──────────┤
@@ -62,7 +62,14 @@ live WFS paging — faster, reproducible, and avoids re-fetching identical data
 on every rebuild. Live WFS access remains available for exploring a new area
 or refreshing the dump itself.
 
-## Algorithm: from stream segments to a valley tree
+The study area itself is scoped by the **extent of the input dump** (a bbox
+around the Pyrenees) — there is no elevation/relief-based filter. A trunk
+river like la Garonne is included for as much of its course as the loaded
+dump covers, even where that course leaves the mountains proper; "restrict to
+the Pyrenees" means "bound the data pull to a Pyrenees-covering bbox", not
+"exclude low-elevation reaches of an otherwise-mountain river."
+
+## Algorithm: from stream segments to a drainage tree
 
 ### 1. Segment graph → directed, downstream-pointing
 
@@ -79,7 +86,9 @@ segment, oriented downstream:
 
 ### 2. Segment graph → river graph
 
-Roll individual segments up into **rivers**, one node per named watercourse:
+Roll individual segments up into **rivers**, one node per named watercourse.
+A "river" is a curated *group of segments* sharing a `cours_d_eau` id, not
+necessarily a single simple line:
 
 - Group every edge carrying a `cours_d_eau` id by that id (first id when a
   segment lists several, `/`-joined).
@@ -89,14 +98,47 @@ Roll individual segments up into **rivers**, one node per named watercourse:
   tracked but nobody named — is folded into the named river directly
   downstream of it. Left standalone these are pure noise in a browsable
   tree (this step alone can cut the node count nearly in half on a real
-  catchment).
+  catchment). This is the only automatic *merge* of a small/unnamed river
+  into a larger one; there is no general size-based pruning beyond it (see
+  "Known simplifications" below).
 - Collapsing the above can turn an indirect path between two named rivers
-  into a direct edge, creating a cycle — detect and merge these too.
+  into a direct edge, creating a cycle *between two different river ids* —
+  detect (as a strongly-connected component in the river graph) and merge
+  these too.
+
+**A named `cours_d_eau` can genuinely branch** — a braided channel, an
+anabranch, a distributary that splits and rejoins — so its segment group is
+not guaranteed to be a simple path, and is not even guaranteed to be one
+connected component. The roll-up handles this pragmatically rather than by
+deriving a single canonical channel:
+- `length_m` sums every segment in the group — correct regardless of
+  topology.
+- A braid point (a node with more than one downstream edge within the same
+  river) picks one outgoing edge deterministically (prefer one that already
+  carries this river's id, else a stable tie-break) so the graph stays a
+  DAG; the alternate channel is not discarded from the segment set, just not
+  used to extend the "flows into" walk past that point.
+- A river can leave the network at more than one node (a braid rejoining the
+  parent in two places, or a BD-TOPO split at the mouth) — the outlet used
+  downstream (as a DEM pour point, as "the" course endpoint) is one
+  *representative* point chosen from the candidates, not a derived "true"
+  single mouth.
+- The exported course/path for a river is its full segment set as a
+  collection of lines, not one ordered polyline — a braided river simply
+  renders as multiple line pieces rather than requiring an ordering.
+
+This is a deliberate simplification, not an oversight: solving "what is the
+one true main channel through a braid" is a real hydrology problem with no
+generally-correct answer, and nothing in the app's UI needs one — the map
+and 3D view read a segment set + a representative outlet just fine. Revisit
+only if a specific braided river visibly breaks the catalog or the DEM
+pour-point delineation.
 
 The result: a much smaller `DiGraph`, one node per river, one "flows into"
-edge to its parent, each node carrying its segment set, total length, outlet
-node, and Strahler order. This is the graph every later step (a river's own
-path, its upstream catchment, tree navigation) walks.
+edge to its parent, each node carrying its segment set, total length, a
+representative outlet node, and Strahler order. This is the graph every
+later step (a river's own path, its upstream catchment, tree navigation)
+walks.
 
 **Known data quirks to handle:**
 - This WFS layer only returns features when queried with the URN CRS form
@@ -111,7 +153,7 @@ path, its upstream catchment, tree navigation) walks.
   recorded outlet to find the actual terminal node before using it as a
   DEM pour point.
 
-### 3. River graph → git-graph-shaped valley tree
+### 3. River graph → drainage tree for the UI
 
 Pick a root river (e.g. la Garonne). For each river, split its upstream
 neighbours (children in the flow-into graph) into:
@@ -120,12 +162,14 @@ neighbours (children in the flow-into graph) into:
   child sharing this river's own name if one does, else the child with the
   largest sub-catchment. `None` at a headwater.
 - **tributaries**: every other child, ordered by where it joins (mouth to
-  source, the order met walking upstream) — each the tip of a side branch.
+  source, the order met walking upstream) — each the top of a side branch.
 
 A river with more than one downstream (a genuine bifurcation — anabranch,
 delta, canal tap) is attached under its first downstream in topological
 order; the alternates are recorded as `also_flows_into` rather than
-duplicating the node.
+duplicating the node. (This is a different, coarser kind of branching than
+the intra-river braiding in step 2: here it's one river id flowing into two
+*different* river ids.)
 
 Each node also carries: length, Strahler order, count of valleys upstream,
 a **study-local Pfafstetter-style code** (a path from the chosen root over
@@ -133,6 +177,15 @@ the *loaded* network — sorts and supports "is upstream of" *within one
 catalog build*, not comparable across a different root or a published
 Pfafstetter dataset), and drainage `area_km2` where a watershed polygon
 covers it.
+
+**Known simplifications:**
+- No general small-river pruning/merging beyond the nameless-id fold in
+  step 2. Length- or order-based thresholds elsewhere in the codebase (e.g.
+  a minimum-length CLI option) are display/query filters over the built
+  tree, not merges that change its shape.
+- No connectivity check that a single river id's segments form one
+  component — braid handling (step 2) assumes overlap/adjacency from the
+  source data, not a verified graph property.
 
 ## Algorithm: catchment delineation
 
@@ -255,7 +308,7 @@ Stages, each independently re-runnable and cacheable:
    (heightmap + streams + basemap texture). Resumable — a river whose output
    file already exists is skipped.
 5. **Catalog build**: walk the river graph from the chosen root into the
-   git-graph-shaped JSON tree, folding in catchment polygons (for map
+   mainline/tributary JSON tree (§3 above), folding in catchment polygons (for map
    masking) and the set of rivers with baked terrain (so the UI knows which
    selections can offer a 3D view). Render to one self-contained
    `index.html` plus the per-river `terrain.json` files it lazy-loads.

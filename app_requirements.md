@@ -13,8 +13,8 @@ In scope:
 
 1. A **river catalog** — the full named-river network of the Pyrenees (or a
    study area within it), browsable as a tree rooted at a trunk river.
-2. A **valley selector UI** — a git-graph-style two-level tree plus a map,
-   for picking a valley and seeing where it sits in the river system.
+2. A **valley selector UI** — a two-level drainage-tree view plus a map, for
+   picking a valley and seeing where it sits in the river system.
 3. A **3D terrain view** for a selected valley — heightmap, draped stream
    network, real basemap texture.
 4. The **data pipeline** that produces the catalog and terrain data from
@@ -27,31 +27,29 @@ Out of scope (deliberately dropped from the earlier exploration):
   "map plate"). Revisit only if the catalog + 3D view prove insufficient.
 - The Streamlit interactive navigator. The static site is the product; a
   local dev server is a nice-to-have, not a deliverable.
-- Anything not reachable from "Garonne down to a headwater" — no other river
-  basins outside the Pyrenees.
+- Anything not reachable from "Garonne down to a headwater" within the study
+  area's data extent — no other river basins, no reaches outside the loaded
+  data (see [app_design.md](app_design.md) for how the study area is
+  bounded).
 
-## Core concept: the valley tree
+## Core concept: the drainage tree
 
-The mental model is a **git commit graph**, not a directory tree or a flat
-map:
-
-| git                          | valley tree                                    |
-|-------------------------------|------------------------------------------------|
-| commit                        | a river                                         |
-| parent commit                 | the river it flows into                         |
-| merge commit                  | a confluence                                    |
-| `main`                        | the trunk, e.g. la Garonne                      |
-| `git log --first-parent`      | the trunk walked from a headwater to the root   |
-
-Each river has exactly one **mainline** parent-direction neighbour upstream
-(the dominant water path — the same valley, continuing) and zero or more
-**tributaries** (each the tip of a side-branch joining at this confluence,
-ordered biggest catchment first).
+Named rivers form a **drainage tree**: each river flows into exactly one
+downstream river (its parent), except at the root (the trunk, e.g. la
+Garonne). At a confluence, one upstream neighbour is the **mainline** — the
+dominant water path, the same valley continuing upstream — and the rest are
+**tributaries**, each the top of a side branch joining in at that point,
+ordered biggest catchment first.
 
 This matters because it is *the* way a user finds a valley: not by name
 search on a flat list, not by clicking around a 2D map, but by walking the
 tree — "I'm on the Garonne, what feeds it near Saint-Gaudens? the Neste —
 what feeds the Neste? ...".
+
+Note: a "river" here is a *named watercourse* — a curated grouping of many
+raw survey segments, not always a single simple line (see
+[app_design.md](app_design.md) for how naming, branching, and the
+mainline/tributary split are actually derived from the source data).
 
 ## User-facing features
 
@@ -63,8 +61,10 @@ what feeds the Neste? ...".
   - the selected river, highlighted;
   - its tributaries listed below, biggest first, each showing name and a
     couple of key facts (length, drainage area if known).
-  - Rendered as a real git-graph: lanes, not indentation — a lane runs
-    unbroken through the trunk and curves in at each confluence.
+  - Rendered as lanes, not indentation — a lane runs unbroken through the
+    trunk and curves in at each confluence, so the trunk stays visually
+    continuous as tributaries join it (similar in spirit to a commit-graph
+    visualization, without adopting git's vocabulary).
 - Clicking a tributary re-centers the view one level down (that tributary
   becomes the new selection); clicking the "go back" link re-centers one
   level up.
