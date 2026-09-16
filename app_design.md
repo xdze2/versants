@@ -41,7 +41,7 @@ The browser only ever reads static JSON/HTML/JS and draws.
 | Vector geo data               | `geopandas` / `shapely`                  | Reading WFS/GeoParquet, dissolving polygons, geometry ops. |
 | Raster / DEM                 | `rasterio` + `pysheds`                   | Standard hydrology raster stack; pysheds gives D8 flow routing + watershed delineation. |
 | Published output             | Static HTML + vanilla JS, no framework   | No backend requirement; a build step, not a running app. Revisit once the UI spec (tree/map/3D shell) has stopped moving — see "Open question" below. |
-| 2D map                       | Leaflet + IGN/OSM tile layers            | Lightweight, no API key needed for the basemap tiles used. |
+| 2D map                       | Leaflet + IGN/MapTiler tile layers       | Lightweight; interim off-the-shelf tiles, not the custom outdoor style requirements calls for — see "Basemap texture — current status" below. |
 | 3D terrain view               | three.js (from CDN at view time)         | Only mainstream option for in-browser WebGL with no plugins. |
 | Site hosting                  | GitHub Pages, serving `docs/`            | Free, static, matches "no backend" requirement. |
 
@@ -72,7 +72,8 @@ framework-agnostic JSON the shell fetches, so the choice stays swappable.
 | IGN BD TOPO® v3, `troncon_hydrographique` | Stream segments: geometry, flow direction, Strahler order, `cours_d_eau` id, nature/fictif flags | Géoplateforme WFS 2.0, or a bulk local dump (GeoParquet) for repeated runs |
 | IGN BD TOPO® v3, `bassin_versant_topographique` | Pre-computed drainage-basin polygons, keyed to a watercourse | Same WFS, bulk dump |
 | Copernicus GLO-30 DEM | ~30 m global elevation, for catchment delineation and 3D terrain | Public unauthenticated AWS S3 bucket `copernicus-dem-30m` (1°×1° COG tiles, plain HTTPS, no key, no rate limit) |
-| IGN Plan IGN (WMTS) | Basemap texture, for the 2D Leaflet map (live tiles) and baked into the 3D terrain block (fetched once, offline) | Key-free WMTS endpoint, Web Mercator tile grid |
+| IGN Plan IGN (WMTS) | Basemap texture, for the 2D Leaflet map (live tiles) and baked into the 3D terrain block (fetched once, offline) — interim choice, see "Basemap texture — current status" below | Key-free WMTS endpoint, Web Mercator tile grid |
+| MapTiler (`streets-v2` raster) | Alternate 2D basemap (OSM-based); interim, see "Basemap texture — current status" below | Free tier, needs an origin-restricted API key |
 
 A local bulk dump (GeoParquet) is the standard input for pipeline runs, not
 live WFS paging — faster, reproducible, and avoids re-fetching identical data
@@ -306,6 +307,107 @@ Client side: three.js builds a solid extruded terrain mesh from the
 heightmap (reads as a physical relief block, not a floating sheet), drapes
 the stream polylines and the baked basemap texture on top, and provides
 orbit/pan/zoom.
+
+## Basemap texture — current status
+
+`app_requirements.md`'s actual requirement is a **custom, free, outdoor-style
+basemap**, shared between the 2D map and the 3D terrain texture, both masked
+to the catchment boundary. Not implemented yet — no custom style exists. What
+is in place today is interim, picked to get *a* working tile layer while the
+real style is worked out:
+
+- **2D Leaflet map** (`catalog_map.js`): two off-the-shelf raster layers,
+  radio-selectable — IGN Plan (key-free WMTS,
+  `data.geopf.fr/wmts?...PLANIGNV2`) as the default, and an OSM-based layer
+  via **MapTiler** (`api.maptiler.com/maps/streets-v2`) as the alternative.
+  The MapTiler layer needs a free, origin-restricted API key
+  (`MAPTILER_API_KEY` env var or a gitignored `maptiler.secret` file at the
+  repo root — see `catalog_html.py::_maptiler_api_key`); the radio option is
+  omitted from the page entirely when no key is configured, so there's no
+  broken layer to fall back on. Directly hotlinking
+  `tile.openstreetmap.org` (the first thing tried) does not work reliably —
+  OSM's tile server actively blocks/rate-limits third-party production
+  traffic; CARTO's basemap tiles, tried next, now also require a free API
+  key as of an Aug 2026 policy change (previously key-free).
+- **3D terrain texture** (`render/basemap.py`, baked offline): fetches the
+  same key-free IGN Plan WMTS tiles, mosaics and warps them onto the
+  heightmap grid. Wired into `terrain_precompute.py`'s `--basemap` flag, but
+  every currently-baked `docs/terrain/*.json` file is missing its `basemap`
+  key — the batch silently failed for all 51 rivers on some prior run
+  (broad `except Exception` in `fetch_basemap_rgb`, logged as a warning and
+  skipped rather than raised); a direct call to the same function outside
+  the batch succeeds, so this looks like a transient/rate-limit issue, not a
+  code bug — needs a re-run to confirm and produce real textures.
+- **Catchment masking** (`catalog_map.js::paintMask`) only applies in the 2D
+  view today; the 3D view has no equivalent — a selected valley's 3D block
+  currently shows the full baked tile extent, not clipped to the catchment
+  boundary.
+- The two views' basemaps are neither the same *style* (generic IGN/OSM
+  raster vs. a to-be-designed outdoor style) nor, in the 3D case, reliably
+  present at all — "shared style across 2D and 3D" (per requirements) has
+  not been started.
+
+Options considered for the real custom style, not yet decided between:
+a hosted vector-style editor (MapTiler Cloud / Mapbox Studio) exported as
+either a MapLibre GL vector style (requires swapping Leaflet for MapLibre GL
+JS, since Mapbox/MapTiler styles are vector, not raster) or as raster XYZ
+tiles (drop-in `L.tileLayer` replacement, no library swap, but loses live
+style editing); or a free/keyless open stack (OpenFreeMap's vector tiles +
+Maputnik's open-source style editor + a MapLibre GL port) with no ongoing
+account/quota management. Self-hosting a pre-baked tile pyramid was also
+considered and set aside for now: full-Pyrenees coverage up to a
+trail-usable zoom (~z14) is roughly 500 MB–1 GB as static files (PMTiles or
+plain XYZ), which fits the static-site architecture but is a separate,
+sizeable effort or a further phase.
+
+## Per-valley hand-curated overrides
+
+Some per-river data can't be computed from the WFS/DEM pipeline and isn't
+worth generalizing into a formula — `config/valley_overrides.yaml`, keyed by
+`cours_d_eau_id`, holds it. Loaded by
+`valleespyr.config.load_valley_overrides`/`_if_present` (same
+default-if-present pattern as `study_area.yaml`), passed as `build_catalog`'s
+`overrides` param, and consumed via the existing `keep(cid)` child-filter
+closure (`blacklist`) and `_build_geo`'s per-river dict (`camera`, folded
+into `geo.rivers[id]["camera"]`). Every field is optional and every river not
+listed gets the computed defaults — the file is safe to leave absent
+entirely.
+
+Two fields exist today:
+
+- **`blacklist: true`** — drops the river, and everything upstream of it,
+  from the tree, folded into the parent's `n_folded` count (same mechanism a
+  DEM-undetermined leaf uses). For pruning data errors/unnamed ditches out of
+  the catalog, not for hiding something that might come back without a
+  pipeline re-run.
+- **`camera`** — overrides the 3D view's auto-computed initial shot
+  (`catalog_3d.js`'s `shotFor()`). The computed default derives camera
+  height/backoff purely from the valley's *horizontal* footprint size, with
+  no reference to actual relief (`z_min`/`z_max`), so a narrow/steep or
+  wide/flat valley can get a shot that clips into the hillside or frames
+  mostly empty space — this override is a hand-tunable escape hatch for
+  those cases, not a fix to the general formula (see the "Basemap texture"
+  section above for the same "escape hatch vs. real fix" pattern). All keys
+  optional, each spherical relative to the target: `azimuth_deg` (compass
+  bearing, 0 = north; default 0), `elevation_deg` (angle above horizon;
+  default 20), `distance_m` (camera-to-target distance; default ~0.6× the
+  valley's footprint size), `target_height_m` (look-target height above the
+  valley floor; default a small fraction of footprint size).
+  `catalog_3d.js`'s `shotFor()` checks `geo.rivers[id].camera` first,
+  converting the spherical params into the same `{pos, target}` shape the
+  computed fallback produces, so the rest of the fly-to/orbit code is
+  unchanged. Tuned by hand — open the river in the browser, orbit/zoom to a
+  shot that looks right, estimate `azimuth_deg` from the compass widget and
+  `distance_m`/`elevation_deg` by feel; there's no live-camera read-back yet.
+  One entry exists so far (Ruisseau de Lastie, whose computed shot clips into
+  the hillside).
+
+Worth revisiting once more valleys have baked terrain and it's clearer how
+often the computed default actually misses: deriving `shotFor()`'s
+height/target from the terrain payload's `z_min`/`z_max`/`z_exaggeration`
+instead of horizontal footprint size alone would likely shrink how often a
+hand override is needed, without eliminating the need for this file (data
+errors needing `blacklist` aren't something a formula fixes).
 
 ## Build pipeline (offline)
 

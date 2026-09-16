@@ -78,10 +78,20 @@ mainline/tributary split are actually derived from the source data).
 
 - Shows the selected river's course and its upstream catchment network on a
   real basemap.
+- The basemap should be a **custom, free, outdoor-oriented style** — legible
+  hiking/mountain terrain (relief, trails, contours), not a generic street
+  map — and the *same* style/source should be used for both the 2D map and
+  the 3D terrain texture (§3), so switching views doesn't also switch
+  basemaps. Not yet implemented: current basemaps are off-the-shelf tile
+  providers (IGN Plan, MapTiler's OSM style), picked to get *a* working map
+  layer while this is worked out — see
+  [app_design.md](app_design.md#basemap-texture--current-status) for the
+  current state and options.
 - When the selected valley's drainage area is known and "reads as one
   valley" (roughly 5–150 km²), the map masks out everything outside that
   valley's catchment boundary — reinforcing "this valley is its own bounded
-  world", not a flat bird's-eye plane shared with its neighbours.
+  world", not a flat bird's-eye plane shared with its neighbours. This
+  masking should apply consistently in both the 2D map and the 3D view.
 
 ### 3. 3D terrain view
 
@@ -92,7 +102,8 @@ mainline/tributary split are actually derived from the source data).
     physical relief model);
   - the traced stream network draped on top;
   - a real aerial/topographic basemap texture draped on the surface, not a
-    flat color or synthetic hillshade;
+    flat color or synthetic hillshade — same custom outdoor style as the 2D
+    map (§2), and masked to the catchment boundary the same way;
   - orbit/pan/zoom controls; runs in-browser with no plugins.
 - Not every river needs this — it's for valley-sized catchments a user would
   actually want to look at in 3D, not every 2 km headwater trickle.
