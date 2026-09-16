@@ -34,6 +34,30 @@ MAP_MAX_VW = 75     # % of window width — ceiling for the map column
 MAP_H = 560         # px — fixed height of the Leaflet map viewport
 LEAFLET_VERSION = "1.9.4"
 
+# --- git-graph lane geometry (shared with the client via _GEOM) ------------
+# Two fixed lanes always: 0 is the trunk (back link / selected / mainline
+# child), 1 is where every sibling or tributary draws its own short "o--"
+# branch stub off the trunk at its own row. A river with 50 tributaries
+# costs the same width as one with two — nothing scales with fan-out.
+ROW_H = 30          # px per row — matches .labels .row's own height
+LANE_W = 15         # px per lane column
+LANE_PAD = 10       # left padding before lane 0
+DOT_R = 3.2         # merge/branch dot radius
+LABEL_GAP = 10      # px between the lane area and the label column
+N_LANES = 2
+
+# Strahler order -> (stroke width, colour). Index 0 == order 1; clamped to ends.
+_ORDER_STYLE = [
+    (1.1, "#9db8d0"),  # 1 — pale headwater
+    (1.4, "#7ba3c9"),  # 2
+    (1.8, "#5b8bbf"),  # 3
+    (2.3, "#3f74af"),  # 4
+    (2.8, "#2f6096"),  # 5
+    (3.4, "#244d7c"),  # 6
+    (4.0, "#1c3e63"),  # 7+ — trunk
+]
+_BG = "#fbfbfa"
+
 
 # --- document -------------------------------------------------------------
 
@@ -70,31 +94,24 @@ main {{ padding: 8px 22px 60px; }}
   position: relative; display: grid;
   grid-template-columns: {grid_cols}; align-items: start;
 }}
+.treecol {{ display: grid; grid-template-columns: {lane_w}px 1fr; align-items: start; }}
+.treewrap {{ overflow-x: auto; overflow-y: hidden; }}
+svg.graph {{ display: block; }}
 ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .labels .row {{
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; white-space: nowrap; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; height: {row_h}px;
+  padding: 0 10px; white-space: nowrap; cursor: pointer;
   border-radius: 6px;
 }}
 .labels .row:hover {{ background: #fff; box-shadow: inset 0 0 0 1px var(--line); }}
-.labels .row.selected-river {{
-  cursor: default; padding-left: 22px; position: relative;
-}}
-.labels .row.selected-river::before {{
-  content: '●'; position: absolute; left: 8px; color: var(--accent); font-size: 9px;
-}}
+.labels .row.selected-river {{ cursor: default; }}
 .labels .row.selected-river .name {{ color: var(--accent); font-weight: 700; }}
 .labels .row.back {{ color: var(--dim); }}
 .labels .row.back .arrow {{ color: var(--faint); }}
 .labels .row.back .hint {{ color: var(--faint); font-size: 11px; margin-left: 2px; }}
 .labels .row.sibling {{ color: var(--dim); }}
-.labels .row.sub {{ padding-left: 30px; position: relative; }}
-.labels .row.sub::before {{
-  content: '↳'; position: absolute; left: 10px; color: var(--faint); font-size: 11px;
-}}
-.labels .row.more-sibs {{
-  padding: 0 10px; color: var(--faint); cursor: default; letter-spacing: 2px;
-}}
+.labels .row.more-sibs {{ color: var(--faint); font-size: 11.5px; }}
+.labels .row.more-sibs .name {{ font-weight: 400; }}
 
 .mapcol {{ position: sticky; top: {map_top}px; align-self: start; }}
 .mapcard {{
@@ -194,13 +211,23 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
         + (" · click a row to select it" if has_geo else " · click a row to re-center")
     )
 
+    lane_w = LANE_PAD + N_LANES * LANE_W
+
     css = _CSS_TMPL.format(
         grid_cols=rest_cols,
         map_top=128,
         map_h=MAP_H,
+        lane_w=lane_w,
+        row_h=ROW_H,
     )
 
-    js = _JS
+    geom = {
+        "ROW_H": ROW_H, "LANE_W": LANE_W, "LANE_PAD": LANE_PAD,
+        "DOT_R": DOT_R, "LABEL_GAP": LABEL_GAP, "BG": _BG,
+    }
+    js = _JS.replace("__GEOM__", json.dumps(geom)).replace(
+        "__ORDER_STYLE__", json.dumps(_ORDER_STYLE)
+    )
     # _JS_GEO must run first: it defines window._catalogInitGeo, which the
     # base script's IIFE calls (synchronously, at its own end) once it exists.
     if has_geo:
@@ -237,7 +264,10 @@ def catalog_to_html(catalog: dict[str, Any], *, max_depth: int | None = None) ->
 </header>
 <main>
   <div class="graphwrap">
-    <ol id="labels" class="labels"></ol>
+    <div class="treecol">
+      <div class="treewrap"><svg id="graph" class="graph" width="1" height="1" viewBox="0 0 1 1" aria-hidden="true"></svg></div>
+      <ol id="labels" class="labels"></ol>
+    </div>
     {map_col}
   </div>
 </main>

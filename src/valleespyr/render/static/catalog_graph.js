@@ -1,8 +1,11 @@
 (function () {
+  const G = __GEOM__;
+  const ORDER_STYLE = __ORDER_STYLE__;
   const data = JSON.parse(document.getElementById('catalog-data').textContent);
   const root = data.root;
   const meta = data.meta || {};
 
+  const graphSvg = document.getElementById('graph');
   const labelsEl = document.getElementById('labels');
   const metaExtra = document.getElementById('meta-extra');
   const filterEl = document.getElementById('filter');
@@ -35,6 +38,10 @@
   function label(n) {
     return n.name ? esc(n.name) : esc(n.id || '?');
   }
+  function orderStyle(order) {
+    const i = !order ? 0 : Math.min(Math.max(order, 1), ORDER_STYLE.length) - 1;
+    return ORDER_STYLE[i];
+  }
 
   // --- selection & breadcrumb -------------------------------------------
   let selectedId = null;
@@ -59,14 +66,14 @@
     }).join('<span class="sep">›</span>');
   }
 
-  // --- the two-level local view ------------------------------------------
-  function rowHtml(n, cls, extraLabel) {
-    const extra = extraLabel != null ? ' <span class="more">+' + extraLabel + '</span>' : '';
-    return '<li class="row' + cls + '" data-id="' + esc(n.id) + '">' +
-           '<span class="name">' + label(n) + '</span>' + extra + alsoHtml(n) + '</li>';
-  }
-
-  function render() {
+  // --- the local view: one row per line, in draw order --------------------
+  // Every row is either on the TRUNK (lane 0 — the go-back parent, the
+  // selected river, its mainline child: one continuous vertical line down
+  // the rows that carry `trunk: true`) or a BRANCH (lane 1 — a sibling or a
+  // tributary, drawn as a short "o--" stub off the trunk at its own row,
+  // regardless of how many other branches there are). A "+N more" row is
+  // just another branch row, not a special case.
+  function buildRows() {
     const sel = nodeById[selectedId] || root;
     selectedId = sel.id;
     recomputeSpine(sel.id);
@@ -76,45 +83,142 @@
     const sibs = siblingsOf[sel.id] || [sel.id];
     const idx = sibs.indexOf(sel.id);
 
-    let out = '';
+    const rows = [];  // {kind, node, trunk, selected, moreCount}
 
-    if (parent) {
-      out += '<li class="row back" data-id="' + esc(parent.id) + '">' +
-             '<span class="arrow">^</span> <span class="name">' + label(parent) +
-             '</span> <span class="hint">downstream — go back</span></li>';
-    }
+    if (parent) rows.push({ kind: 'back', node: parent, trunk: true });
 
-    if (idx > 1) out += '<li class="row more-sibs">…</li>';
-    if (idx > 0) {
-      const prev = nodeById[sibs[idx - 1]];
-      out += rowHtml(prev, ' sibling');
-    }
+    // The "+N more" row jumps straight to the *farthest* hidden sibling in
+    // that direction — one click surfaces a fresh neighbourhood instead of
+    // stepping one row at a time through a long list.
+    const hiddenBefore = idx;  // siblings before `prev` that aren't shown
+    if (idx > 1) rows.push({ kind: 'more', node: nodeById[sibs[0]], trunk: false, moreCount: hiddenBefore - 1 });
+    if (idx > 0) rows.push({ kind: 'sibling', node: nodeById[sibs[idx - 1]], trunk: false });
 
-    out += '<li class="row selected-river" data-id="' + esc(sel.id) + '">' +
-           '<span class="name">' + label(sel) + '</span>' + alsoHtml(sel) + '</li>';
+    rows.push({ kind: 'selected', node: sel, trunk: true, selected: true });
 
     const kids = [sel.mainline, ...(sel.tributaries || [])].filter(Boolean);
-    for (const k of kids) {
-      const n = k.n_tributaries || 0;
-      out += '<li class="row sub" data-id="' + esc(k.id) + '">' +
-             '<span class="name">' + label(k) + '</span>' +
-             (n ? ' <span class="more">+' + n + '</span>' : '') +
-             alsoHtml(k) + '</li>';
+    kids.forEach((k, i) => {
+      const isMainline = i === 0 && k === sel.mainline;
+      rows.push({ kind: 'sub', node: k, trunk: isMainline });
+    });
+
+    const hiddenAfter = idx >= 0 ? sibs.length - 1 - idx : 0;
+    if (idx >= 0 && idx < sibs.length - 1) rows.push({ kind: 'sibling', node: nodeById[sibs[idx + 1]], trunk: false });
+    if (idx >= 0 && hiddenAfter > 1) {
+      rows.push({ kind: 'more', node: nodeById[sibs[sibs.length - 1]], trunk: false, moreCount: hiddenAfter - 1 });
     }
 
-    if (idx >= 0 && idx < sibs.length - 1) {
-      const next = nodeById[sibs[idx + 1]];
-      out += rowHtml(next, ' sibling');
-    }
-    if (idx >= 0 && sibs.length - 1 - idx > 1) out += '<li class="row more-sibs">…</li>';
+    return rows;
+  }
 
-    labelsEl.innerHTML = out;
+  function rowHtml(r) {
+    if (r.kind === 'more') {
+      const id = r.node ? esc(r.node.id) : '';
+      const target = r.node ? esc(label(r.node)) : '';
+      return '<li class="row more-sibs" data-id="' + id + '" title="jump to ' + target + '">' +
+             '<span class="name">+' + r.moreCount + ' more sibling' + (r.moreCount === 1 ? '' : 's') +
+             ' — click to jump to ' + target + '</span></li>';
+    }
+    if (r.kind === 'back') {
+      return '<li class="row back" data-id="' + esc(r.node.id) + '">' +
+             '<span class="arrow">^</span> <span class="name">' + label(r.node) +
+             '</span> <span class="hint">downstream — go back</span></li>';
+    }
+    const cls = r.kind === 'selected' ? ' selected-river'
+              : r.kind === 'sibling' ? ' sibling'
+              : r.trunk ? ' sub' : ' sub branch';
+    const n = r.node;
+    const nTrib = r.kind === 'sub' ? (n.n_tributaries || 0) : 0;
+    const extra = nTrib ? ' <span class="more">+' + nTrib + '</span>' : '';
+    return '<li class="row' + cls + '" data-id="' + esc(n.id) + '">' +
+           '<span class="name">' + label(n) + '</span>' + extra + alsoHtml(n) + '</li>';
+  }
+
+  // --- draw the graph SVG --------------------------------------------------
+  // lane 0 = trunk, lane 1 = branch stub. Width never depends on how many
+  // branch rows there are — N tributaries cost one extra column, not N.
+  function laneX(lane) { return G.LANE_PAD + lane * G.LANE_W + G.LANE_W / 2; }
+  function rowY(i) { return i * G.ROW_H + G.ROW_H / 2; }
+  const TRUNK_LANE = 0, BRANCH_LANE = 1;
+
+  function drawGraph(rows) {
+    const w = G.LANE_PAD + (BRANCH_LANE + 1) * G.LANE_W;
+    const h = rows.length * G.ROW_H;
+
+    let trunkTop = null, trunkBot = null;
+    rows.forEach((r, i) => { if (r.trunk) { if (trunkTop == null) trunkTop = i; trunkBot = i; } });
+
+    let lines = '', dots = '';
+    if (trunkTop != null) {
+      const x = laneX(TRUNK_LANE);
+      lines += '<line x1="' + x.toFixed(1) + '" y1="' + rowY(trunkTop).toFixed(1) +
+               '" x2="' + x.toFixed(1) + '" y2="' + rowY(trunkBot).toFixed(1) +
+               '" stroke="' + orderStyle(0)[1] + '" stroke-width="2.2"/>';
+    }
+
+    rows.forEach((r, i) => {
+      const cy = rowY(i);
+      if (r.trunk) {
+        const [, c] = orderStyle(r.node && r.node.strahler);
+        const cx = laneX(TRUNK_LANE);
+        if (r.selected) {
+          dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                  '" r="' + G.DOT_R.toFixed(1) + '" fill="' + c + '"/>';
+        } else {
+          dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                  '" r="2.3" fill="' + G.BG + '" stroke="' + c + '" stroke-width="1.5"/>';
+        }
+        return;
+      }
+      // every branch row — including "+N more" — is a stub off the trunk,
+      // always connected at this row's y, whether or not the trunk line
+      // itself reaches this far (a leading/trailing branch elbows off the
+      // nearest trunk dot instead of floating disconnected).
+      const x0 = laneX(TRUNK_LANE), x1 = laneX(BRANCH_LANE);
+      const anchorRow = trunkTop == null ? i
+        : i < trunkTop ? trunkTop : i > trunkBot ? trunkBot : i;
+      const y0 = rowY(anchorRow);
+      const isMore = r.kind === 'more';
+      const [dw, c] = isMore ? orderStyle(0) : orderStyle(r.node && r.node.strahler);
+      const sw = Math.max(dw, 1.4);
+      if (anchorRow === i) {
+        lines += '<line x1="' + x0.toFixed(1) + '" y1="' + cy.toFixed(1) +
+                 '" x2="' + x1.toFixed(1) + '" y2="' + cy.toFixed(1) +
+                 '" stroke="' + c + '" stroke-width="' + sw.toFixed(1) + '"' +
+                 (isMore ? ' stroke-dasharray="1.6 2"' : '') + '/>';
+      } else {
+        // elbow: down/up from the trunk's end, then across
+        lines += '<path d="M' + x0.toFixed(1) + ',' + y0.toFixed(1) +
+                 ' L' + x0.toFixed(1) + ',' + cy.toFixed(1) +
+                 ' L' + x1.toFixed(1) + ',' + cy.toFixed(1) + '" fill="none" ' +
+                 'stroke="' + c + '" stroke-width="' + sw.toFixed(1) + '"' +
+                 (isMore ? ' stroke-dasharray="1.6 2"' : '') + '/>';
+      }
+      if (!isMore) {
+        dots += '<circle cx="' + x1.toFixed(1) + '" cy="' + cy.toFixed(1) +
+                '" r="2.3" fill="' + G.BG + '" stroke="' + c + '" stroke-width="1.5"/>';
+      }
+    });
+
+    graphSvg.setAttribute('width', w);
+    graphSvg.setAttribute('height', h);
+    graphSvg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    graphSvg.innerHTML =
+      '<g stroke-linecap="round" stroke-linejoin="round" fill="none">' + lines + '</g>' +
+      '<g stroke-linecap="round">' + dots + '</g>';
+  }
+
+  // --- render = rows -> labels + graph ------------------------------------
+  function render() {
+    const rows = buildRows();
+    labelsEl.innerHTML = rows.map(rowHtml).join('');
+    drawGraph(rows);
     drawCrumbs();
     applyFilter();
 
-    const n = sel;
+    const sel = nodeById[selectedId] || root;
     let note = '';
-    if (n.n_upstream) note = ' · ' + n.n_upstream + ' rivers upstream';
+    if (sel.n_upstream) note = ' · ' + sel.n_upstream + ' rivers upstream';
     metaExtra.textContent = note;
     if (window._catalogGeoSync) window._catalogGeoSync();
   }
