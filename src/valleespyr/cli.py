@@ -1320,6 +1320,165 @@ def catalog_cmd(
         click.echo(f"wrote {html_output}", err=True)
 
 
+@cli.command("catalog-forest")
+@click.option(
+    "--study-area",
+    "study_area_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=str(DEFAULT_CONFIG_PATH),
+    show_default=True,
+    help="Lists the root rivers to build — one per top-level branch.",
+)
+@click.option("--from-file", "from_file", default=None, help="Local tronçon dump (offline).")
+@click.option("--bbox", "bbox_s", default=None, help=TRONCON_BBOX_HELP)
+@click.option(
+    "--bassins",
+    "bassins_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=None,
+    help="Local bassin_versant_topographique dump — adds a drainage area per "
+    "valley where a sub-basin covers it.",
+)
+@click.option(
+    "--dem-catchments",
+    "dem_catchments_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=None,
+    help="Output of `valley catchments precompute` (data/processed/catchments.json) — "
+    "fills the map mask (--geo) for rivers --bassins doesn't cover.",
+)
+@click.option(
+    "--overrides",
+    "overrides_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=str(DEFAULT_VALLEY_OVERRIDES_PATH)
+    if DEFAULT_VALLEY_OVERRIDES_PATH.is_file()
+    else None,
+    help="Hand-curated per-river data — blacklist and 3D camera overrides. "
+    "Defaults to config/valley_overrides.yaml when present in the cwd.",
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=None,
+    help="Fold each root's tree beyond this many confluences into "
+    "'+N rivers' leaves (default: no limit).",
+)
+@click.option(
+    "--geo",
+    is_flag=True,
+    help="Embed a simplified [lon, lat] centreline + outlet per river, so the HTML "
+    "gets a click-to-draw mini-map of the selected river's network.",
+)
+@click.option(
+    "--terrain-dir",
+    "terrain_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Output of `valley catchments terrain-precompute` — turns the map column "
+    "into a 3D scene that fetches <river_id>.json from here (relative to "
+    "--html's directory) on selection. Implies --geo.",
+)
+@click.option(
+    "-o", "--output", default=None, help="Write the catalog JSON here (default: stdout)."
+)
+@click.option(
+    "--html",
+    "html_output",
+    default=None,
+    help="Also write a self-contained HTML river-git-graph here.",
+)
+@click.pass_context
+def catalog_forest_cmd(
+    ctx: click.Context,
+    study_area_path: str,
+    from_file: str | None,
+    bbox_s: str | None,
+    bassins_path: str | None,
+    dem_catchments_path: str | None,
+    overrides_path: str | None,
+    max_depth: int | None,
+    geo: bool,
+    terrain_dir: str | None,
+    output: str | None,
+    html_output: str | None,
+) -> None:
+    """Build one catalog spanning every root river in --study-area, as one tree.
+
+    Garonne and Adour (say) are not two independent sites — they are both
+    top-level branches of one implicit root (the sea / the study area), same
+    as any confluence splits into tributaries upstream. This walks every
+    resolved root in the study area config and wraps their trees under one
+    synthetic top node, so the single generated page's existing "go back"
+    link doubles as the valley switcher — no separate per-root HTML/JSON
+    files, no picker UI.
+    """
+    from pathlib import Path
+
+    from .catalog import build_forest_catalog
+    from .config import load_study_area
+    from .render.catalog_html import render_catalog_html
+
+    if terrain_dir:
+        geo = True
+
+    study_area = load_study_area(study_area_path)
+    roots = study_area.resolved_roots()
+    if not roots:
+        raise click.ClickException(f"no resolved roots in {study_area_path}")
+
+    rn = _load_river_network(ctx, from_file, bbox_s)
+
+    bassins = None
+    if bassins_path:
+        from .watershed import load_bassins
+
+        bassins = load_bassins(bassins_path)
+
+    dem_catchments = None
+    if dem_catchments_path:
+        dem_catchments = json.loads(Path(dem_catchments_path).read_text("utf-8")).get(
+            "rivers", {}
+        )
+
+    overrides = None
+    if overrides_path:
+        from .config import load_valley_overrides
+
+        overrides = load_valley_overrides(overrides_path)
+
+    try:
+        catalog = build_forest_catalog(
+            rn,
+            [(r.name, r.query) for r in roots],
+            forest_name=study_area.name,
+            bassins=bassins,
+            dem_catchments=dem_catchments,
+            overrides=overrides,
+            max_depth=max_depth,
+            geo=geo,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    m = catalog["meta"]
+    click.echo(
+        f"{m['n_nodes']} rivers across {len(roots)} root(s) under {m['root_name']}"
+        + (f"; areas from {bassins_path}" if m["has_areas"] else ""),
+        err=True,
+    )
+    _dump(catalog, output)
+    if html_output:
+        terrain_url = None
+        if terrain_dir:
+            import os
+
+            html_dir = Path(html_output).resolve().parent
+            terrain_url = os.path.relpath(Path(terrain_dir).resolve(), html_dir)
+        render_catalog_html(catalog, html_output, terrain_url=terrain_url)
+        click.echo(f"wrote {html_output}", err=True)
+
+
 def _render_tree(node: dict, *, max_depth: int | None) -> list[str]:
     """ASCII tree lines: '├── Gave de Pau  (order 4, 8.2 km, 12 seg)'."""
     lines: list[str] = []

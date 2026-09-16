@@ -343,16 +343,19 @@ A single entry point (e.g. a `Makefile` or equivalent task runner) should
 chain 2–6 given the stage-1 dump already present locally, so "rebuild the
 site" is one command once the raw data is on disk.
 
-**Study area config.** `config/study_area.yaml` is the intended source of
-truth for the study bbox (stage 1's dump extent) and the list of root rivers
-each get their own catalog build (stage 5). It is not wired into the CLI or
-the Makefile yet: today's `Makefile` hardcodes the equivalent information
-directly as `TRONCONS`/`BASSINS`/`ROOT` variables (a local dump path and a
-single resolved root id) — those variables are the pre-config-file stand-in
-for what `study_area.yaml` documents. Reading the YAML from `valleespyr
-catalog`/`valley catchments precompute` and from the Makefile, and driving a
-build per `roots` entry instead of one hardcoded `ROOT`, is future wiring,
-not yet implemented.
+**Study area config.** `config/study_area.yaml` is the source of truth for
+the study bbox (stage 1's dump extent) and the list of root rivers. Its
+`roots` are not separate catalogs — Garonne and Adour are both top-level
+branches of one implicit root (the sea / the study area), same as any
+confluence splits into tributaries upstream. `valleespyr catalog-forest`
+(`catalog.build_forest_catalog`) builds each root's tree and wraps them all
+as "tributaries" of one synthetic node, so the published site is a single
+`docs/index.html` + `docs/catalog_index.json` spanning every root — the
+existing tree UI's "go back" / tributary-row navigation doubles as the
+valley switcher, with no separate picker and no per-root page duplication.
+`make site` drives this by default; `make ROOT=<id> site` bypasses the study
+area entirely for a one-off single-river build (`valleespyr catalog`, the
+single-root command `build_forest_catalog` builds on top of).
 
 ## Deliberately out of scope for this design
 

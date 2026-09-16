@@ -24,7 +24,7 @@ pytest.importorskip("shapely")
 
 from shapely.geometry import LineString  # noqa: E402
 
-from valleespyr.catalog import build_catalog  # noqa: E402
+from valleespyr.catalog import build_catalog, build_forest_catalog  # noqa: E402
 from valleespyr.hydro.network import build_graph  # noqa: E402
 from valleespyr.hydro.rivers import build_river_network  # noqa: E402
 from valleespyr.render.catalog_html import catalog_to_html, render_catalog_html  # noqa: E402
@@ -604,6 +604,73 @@ def test_map_ships_the_valley_mask_function(branchy_rn):
     assert "function paintMask(id)" in doc
     assert "fillRule: 'evenodd'" in doc
     assert "paintMask(id);" in doc  # called from paintMap on every selection
+
+
+# ------------------------------------------------------------------- forest catalog
+
+
+def test_forest_wraps_each_root_as_a_tributary(branchy_rn):
+    forest = build_forest_catalog(
+        branchy_rn, [("Stem", "CDE_STEM"), ("Stem2", "CDE_STEM2")], forest_name="test-area"
+    )
+    root = forest["root"]
+    assert root["id"] == "_forest"
+    assert root["name"] == "test-area"
+    assert root["mainline"] is None
+    trib_ids = [t["id"] for t in root["tributaries"]]
+    assert trib_ids == ["CDE_STEM", "CDE_STEM2"]
+
+
+def test_forest_meta_sums_n_nodes_across_roots(branchy_rn):
+    stem_only = build_catalog(branchy_rn, "CDE_STEM")
+    stem2_only = build_catalog(branchy_rn, "CDE_STEM2")
+    forest = build_forest_catalog(branchy_rn, [("Stem", "CDE_STEM"), ("Stem2", "CDE_STEM2")])
+    assert forest["meta"]["n_nodes"] == (
+        stem_only["meta"]["n_nodes"] + stem2_only["meta"]["n_nodes"] + 1
+    )
+    assert forest["meta"]["root_id"] == "_forest"
+
+
+def test_forest_root_is_reachable_via_go_back(branchy_rn):
+    """The synthetic root behaves like any other node for the tree walk: its
+    children have it as their parent, same shape the HTML/JS relies on."""
+    forest = build_forest_catalog(branchy_rn, [("Stem", "CDE_STEM"), ("Stem2", "CDE_STEM2")])
+    ids = {n["id"] for n in walk(forest["root"])}
+    assert {"_forest", "CDE_STEM", "CDE_STEM2"} <= ids
+
+
+def test_forest_geo_merges_rivers_and_bbox(branchy_rn):
+    forest = build_forest_catalog(
+        branchy_rn, [("Stem", "CDE_STEM"), ("Stem2", "CDE_STEM2")], geo=True
+    )
+    geo = forest["geo"]
+    assert "CDE_STEM" in geo["rivers"] and "CDE_STEM2" in geo["rivers"]
+    assert "_forest" not in geo["rivers"]  # not a real river, no geometry
+    w, s, e, n = geo["bbox"]
+    assert w < e and s < n
+
+    stem_bbox = build_catalog(branchy_rn, "CDE_STEM", geo=True)["geo"]["bbox"]
+    stem2_bbox = build_catalog(branchy_rn, "CDE_STEM2", geo=True)["geo"]["bbox"]
+    assert w <= min(stem_bbox[0], stem2_bbox[0])
+    assert e >= max(stem_bbox[2], stem2_bbox[2])
+
+
+def test_forest_no_geo_by_default(branchy_rn):
+    forest = build_forest_catalog(branchy_rn, [("Stem", "CDE_STEM"), ("Stem2", "CDE_STEM2")])
+    assert "geo" not in forest
+    assert forest["meta"]["has_geo"] is False
+
+
+def test_forest_html_is_a_thin_shell_with_no_root_navigation_bug(branchy_rn):
+    """The forest root has no parent, so the two-level selector's "go back"
+    row must not appear when it is the selected/initial node — same
+    parent-less-root behaviour as a normal single-root catalog."""
+    forest = build_forest_catalog(
+        branchy_rn, [("Stem", "CDE_STEM"), ("Stem2", "CDE_STEM2")], geo=True
+    )
+    doc = catalog_to_html(forest)
+    assert doc.lstrip().startswith("<!doctype html>")
+    assert "Stem" not in doc  # no data baked into the shell
 
 
 # ------------------------------------------------------------------ offline sample

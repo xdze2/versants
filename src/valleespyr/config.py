@@ -43,7 +43,7 @@ class RootRiver:
 
     @property
     def slug(self) -> str:
-        """A filesystem/URL-safe stand-in for ``name`` (e.g. "l'Adour" -> "adour").
+        """A filesystem/URL-safe stand-in for ``name`` (e.g. "l'Adour" -> "l-adour").
 
         Used to give each root's build its own output path under ``docs/``.
         """

@@ -268,6 +268,97 @@ def build_catalog(
     return out
 
 
+def build_forest_catalog(
+    rn: RiverNetwork,
+    roots: list[tuple[str, str]],
+    *,
+    forest_name: str = "study area",
+    bassins: gpd.GeoDataFrame | None = None,
+    max_depth: int | None = None,
+    geo: bool = False,
+    dem_catchments: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one catalog spanning every root in ``roots``, as a single tree.
+
+    Garonne and Adour are not two unrelated catalogs that happen to share a
+    build recipe — they are both top-level branches of one implicit root (the
+    sea / the study area), same as any confluence splits into tributaries.
+    This wraps each ``(name, root_query)`` root's own :func:`build_catalog`
+    tree as a "tributary" of one synthetic node, so the existing browsable
+    tree (breadcrumb, go-back link, tributary rows) switches between valleys
+    for free — no separate picker UI, no per-root HTML/JSON duplication.
+
+    The synthetic root has id ``"_forest"`` and carries no river facts of its
+    own (no length/strahler/area — it is not a real river); its
+    ``tributaries`` are the given roots' trees, ordered as given. ``geo``
+    blocks (river ids are globally unique ``COURDEAU…`` ids, so no key
+    collision) and ``meta.n_nodes`` are merged across all roots.
+
+    Returns the same ``{"root", "meta", ...}`` shape as :func:`build_catalog`.
+    """
+    trees = []
+    n_nodes = 0
+    has_areas = False
+    geo_rivers: dict[str, dict[str, Any]] = {}
+    bbox: list[float] | None = None
+
+    for name, root_query in roots:
+        cat = build_catalog(
+            rn,
+            root_query,
+            bassins=bassins,
+            max_depth=max_depth,
+            geo=geo,
+            dem_catchments=dem_catchments,
+            overrides=overrides,
+        )
+        trees.append(cat["root"])
+        n_nodes += cat["meta"]["n_nodes"]
+        has_areas = has_areas or cat["meta"]["has_areas"]
+        if geo:
+            g = cat["geo"]
+            geo_rivers.update(g["rivers"])
+            if g["bbox"] is not None:
+                w, s, e, n = g["bbox"]
+                bbox = [w, s, e, n] if bbox is None else [
+                    min(bbox[0], w), min(bbox[1], s), max(bbox[2], e), max(bbox[3], n),
+                ]
+
+    forest_root: dict[str, Any] = {
+        "id": "_forest",
+        "name": forest_name,
+        "length_km": None,
+        "strahler": None,
+        "n_upstream": n_nodes,
+        "n_tributaries": len(trees),
+        "n_folded": 0,
+        "depth": 0,
+        "pfafstetter": None,
+        "is_headwater": False,
+        "also_flows_into": [],
+        "area_km2": None,
+        "n_sub_basins": 0,
+        "mainline": None,
+        "tributaries": trees,
+    }
+
+    out: dict[str, Any] = {
+        "root": forest_root,
+        "meta": {
+            "root_id": "_forest",
+            "root_name": forest_name,
+            "n_nodes": n_nodes + 1,
+            "has_areas": has_areas,
+            "has_geo": geo,
+            "model": "git",
+        },
+    }
+    if geo:
+        out["geo"] = {"bbox": bbox, "rivers": geo_rivers}
+    return out
+
+
 # ------------------------------------------------------------------- map geometry
 
 
@@ -736,4 +827,4 @@ def _area_for_river(
     return area_km2, n_sub
 
 
-__all__ = ["build_catalog", "polygon_to_rings"]
+__all__ = ["build_catalog", "build_forest_catalog", "polygon_to_rings"]

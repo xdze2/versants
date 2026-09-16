@@ -257,6 +257,59 @@ without changing the general formula.
       without disturbing unrelated rivers, camera passes through to
       `geo.rivers` only for the overridden id). Full suite: 137 passed.
       Screenshots saved to `docs/images/test_screenshots/` for reference.)
+
+## 3d. Multi-root site was N duplicated pages, not one tree (found reviewing `docs/l-adour/`)
+
+Item 2's per-root scheme (`docs/index.html` for the front-page root,
+`docs/<slug>/index.html` + its own `catalog_index.json` for every other
+root) built N structurally-identical, disconnected static pages: no
+cross-valley navigation existed anywhere in the generated site (landing on
+la Garonne's page, there was no link to l'Adour's), and every root
+duplicated the same ~48 KB HTML/JS/CSS shell verbatim (byte-identical but
+for the `<title>` and one relative path constant). Root cause: Garonne and
+Adour aren't two independent catalogs — they're both top-level branches of
+one implicit root (the sea / the study area), same as any confluence splits
+into tributaries. The per-root-directory design modeled them as unrelated
+sites instead of siblings in one tree.
+
+- [x] Added `catalog.build_forest_catalog`: builds each study-area root's
+      own tree via the existing `build_catalog`, then wraps them all as
+      `tributaries` of one synthetic node (`id: "_forest"`, no
+      length/strahler/area of its own). `geo` blocks merge (`rivers` dicts
+      union — ids are globally unique `COURDEAU…` ids, no collision risk;
+      `bbox` unions across roots). No JS changes needed at all: the tree
+      renderer (`catalog_graph.js`) already treats "the root" as just
+      whatever node has no parent, so the synthetic node's children get a
+      "go back" row for free and clicking a tributary row navigates in
+      exactly like any other confluence — switching valleys is the existing
+      navigation, not a new picker widget.
+- [x] New CLI command `catalog-forest` (mirrors `catalog`'s options minus
+      the single `ROOT_QUERY`; reads `--study-area`, default
+      `config/study_area.yaml`) calling `build_forest_catalog` over
+      `resolved_roots()`.
+- [x] Makefile: replaced the per-root `while read` loop + `_build_root`
+      sub-target with one `catalog-forest` call to `docs/index.html`
+      (`ROOT=<id>` still works as a separate single-river path via the
+      original `catalog` command, for one-off test builds). `preview`'s
+      staleness check is back to watching just `docs/index.html`.
+      `data/processed/<slug>.json` collapsed to one `data/processed/
+      catalog.json`.
+      (`RootRiver.slug` is no longer load-bearing for site structure, but
+      left as-is — still a reasonable public helper, and its behavior
+      already matches its own test (`"l'Adour" -> "l-adour"`); the
+      docstring's example was the only actual mismatch, now fixed.)
+- [x] Removed `docs/l-adour/` (stale duplicate directory) and the old
+      per-slug `data/processed/*.json` files.
+      Tests: `tests/test_catalog.py` — 6 new tests on
+      `build_forest_catalog` (tree shape, `meta.n_nodes` sum, reachability
+      via go-back, `geo` merge, no-geo-by-default, thin-shell HTML with no
+      root data leaked). Verified end-to-end against the real Pyrenees data
+      (`make site`) with a scripted Playwright session: top level shows
+      "pyrenees-garonne" with "la Garonne"/"l'Adour" as sibling rows and no
+      map yet (correct — the synthetic root isn't a real river); clicking
+      into either valley shows its own sub-rivers, a working go-back row,
+      and (for la Garonne) the 2D map drawing that river's network; zero
+      console errors.
 - [ ] The underlying computed-default formula in `shotFor()` is still blind
       to relief — this override file is a hand-tunable escape hatch, not a
       fix to the general case. Worth revisiting once more baked valleys
