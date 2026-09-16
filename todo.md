@@ -329,6 +329,107 @@ sites instead of siblings in one tree.
       terrain_dir)` helpers (mirroring the existing `_load_troncons_gdf`-style
       helpers already in `cli.py`) and have both commands call them.
 
+## 3e. Custom basemap style: 2D done, 3D still broken (found this session)
+
+Goal (see `app_requirements.md` §2/§3 and `app_design.md`'s "Basemap texture"
+section): a custom, free, outdoor-style basemap, shared between the 2D map
+and the 3D terrain texture, both masked to the catchment boundary.
+
+**2D map: done.** Ported `catalog_map.js` from Leaflet to MapLibre GL JS
+4.1.2, since a MapTiler Cloud custom style (`01a0ab2c-1a18-7b37-83c6-
+14605f4dd408` — set via `MAPTILER_STYLE_ID` env var or the
+`_MAPTILER_STYLE_ID` constant in `catalog_html.py`) is vector, not raster —
+MapTiler's free tier renders it client-side via MapLibre but refuses to
+rasterize it server-side (`403 Access to rendered maps not allowed`, paid-
+tier only; confirmed via the actual API response, `x-maptiler-free: 1`).
+River rendering rebuilt around one GeoJSON source + per-river feature-state
+(`selected`/`upstream`/`preview`) driving a data-driven paint expression,
+replacing Leaflet's one-polyline-object-per-river model. IGN Plan and OSM-
+via-MapTiler kept as the other two radio options; hillshade overlay,
+catchment masking, click-to-select and hover-preview all ported and
+verified working via headless-browser screenshots (all three basemaps,
+style-swap mid-selection, mask, map-click, hover).
+
+Found and fixed one real MapLibre gotcha along the way, worth remembering:
+**`map.on('style.load', ...)` only ever fires once**, for the map's very
+first style — every subsequent `setStyle()` call (e.g. the basemap radio)
+instead fires `'styledata'` (and `isStyleLoaded()` is unreliable right at
+that event, so don't gate on it either). Missing this meant every basemap
+switch silently wiped the river overlay/mask and never redrew them.
+
+**3D terrain texture: still broken, root cause not yet found.** Not part of
+this fix — `catalog_3d.js`/`render/basemap.py` still bake from the key-free
+IGN Plan WMTS (not the custom style at all yet — that's a separate,
+bigger piece of work, see the note at the end of this section). But
+separately, the *existing* IGN texture doesn't visibly render even where
+real basemap data is present:
+
+- Of the 51 committed `docs/terrain/*.json` files, only 4 currently carry a
+  `basemap` key at all (`COURDEAU0000002000907013` "Neste de Rioumajou",
+  `...907102`, `...907105`, `...907106`) — the other 47 were baked without
+  `--basemap` or hit some failure; `fetch_basemap_rgb`'s broad
+  `except Exception` (`basemap.py`) logs a warning and returns `None`
+  rather than raising, so a batch run gives no visible sign of *which*
+  rivers failed or why.
+- For the 4 that do have real data: verified end-to-end that the data
+  itself is completely correct — extracted "Neste de Rioumajou"'s baked
+  `basemap` data URI, decoded it, and confirmed it's a real, detailed,
+  colorful IGN Plan JPEG (contours, hillshade, trail labels — same visual
+  quality as `scratchpad/rioumajou_relief.png`). Instrumented
+  `catalog_3d.js` at runtime (temporarily, since removed) and confirmed
+  `basemapImg` loads, `basemapData` (the canvas-read pixel array) is
+  correctly sized and non-null, and — the clinching check — extracted the
+  exact canvas content the code reads back (`bcvs.toDataURL()`) and
+  compared it pixel-for-pixel (numpy) against the original JPEG: **exact
+  match**, mean/std identical. So the data pipeline (bake → data URI →
+  `Image` → canvas → `getImageData`) is 100% correct, ruled out with
+  certainty.
+- Yet the actual three.js render shows a flat, largely textureless tan/
+  grey surface — no visible map detail, at both a normal view and zoomed/
+  reoriented (screenshotted both). `topVert()`'s per-vertex color
+  selection (`col = [basemapData[bo]/255, ...]` when `basemapData` is
+  truthy) looks structurally correct and reads from the right index
+  (`gi = r * COLS + c`, same indexing as `elevY`/`shadeT`); the
+  `MeshStandardMaterial({vertexColors: true, ...})` setup on the top mesh
+  also looks correct (three.js r159's boolean `vertexColors` API, no
+  competing `color` override, no tone mapping configured on the renderer
+  that would wash things out). Ran out of session time before finding the
+  actual gap between "correct per-vertex color values" and "flat render" —
+  candidates not yet ruled out: `computeVertexNormals()` + the
+  `HemisphereLight`/`DirectionalLight` setup interacting with real-but-
+  subtle (`std≈25`, fairly desaturated high-mountain palette) color
+  variance in a way that reads as visually flat even though it's technically
+  textured (i.e. maybe not a bug at all, just an unconvincing lighting/
+  material choice for this kind of data — needs a side-by-side with a
+  known-high-contrast test texture to settle); a possible triangle-winding
+  or duplicate-vertex issue that isn't obvious from reading the loop; or
+  something in how the selected-river highlight/footprint geometry drawn
+  on top is obscuring the textured surface at the camera angles tried so
+  far (not fully ruled out — every screenshot so far has the selected
+  river's blue tube geometry covering a large fraction of the visible
+  terrain).
+- Next step: a minimal standalone three.js test page (same geometry-build +
+  material code, manual OrbitControls, no app chrome around it) loading
+  one known-good baked JSON directly, to isolate this from the app's camera/
+  selection/lighting-interaction code and get a clean top-down, unobstructed
+  view. Also worth trying: temporarily swap in a synthetic high-contrast
+  checkerboard as `basemapData` to see unambiguously whether *any* image
+  detail reaches the screen, before spending more time on the real IGN
+  texture specifically.
+
+**Not started at all: bringing the custom vector style into the 3D
+texture.** Discussed briefly this session — rather than fighting MapTiler's
+raster-export paywall again, the likely path is to render the custom style
+to a raster image *locally* (a headless MapLibre GL renderer, e.g.
+`@maplibre/maplibre-gl-native` or a headless-Chromium screenshot of a
+MapLibre page) at one or two fixed zoom levels per selected catchment,
+reusing `basemap.py`'s existing mosaic-and-warp-onto-heightmap logic just
+swapping the tile/image source. Not scoped or attempted yet — blocked
+behind getting the *existing* IGN-texture-on-3D-terrain pipeline actually
+visible first (the bug above), since there's no point building a second,
+more complex baking path on top of a rendering step that's already not
+working for the simpler case.
+
 ## 4. Full-Pyrenees / multi-root batch run
 
 Currently only one root (`ROOT ?= COURDEAU...` for Neste de Rioumajou) has
