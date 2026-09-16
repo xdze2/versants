@@ -58,16 +58,68 @@ backing.
       passed. `dump.py`/`hydro`/`valley`/`catalog` commands are unchanged —
       they take a local `--from-file`, not the live WFS, so nothing to
       default there. Tests in `tests/test_config.py`.)
-- [ ] Resolve the `roots` list's `cours_d_eau_id: null` placeholders (la
-      Garonne, l'Agout) to real ids — needed before they're usable as CLI
-      `catalog <root>` arguments.
-- [ ] Decide + implement how the Makefile picks up the config: read
+- [x] Resolve the `roots` list's `cours_d_eau_id: null` placeholders to real
+      ids — needed before they're usable as CLI `catalog <root>` arguments.
+      (Resolved via `valleespyr hydro rivers show <name> --from-file
+      data/raw/troncon_hydrographique_pyrenees.parquet`: la Garonne →
+      `COURDEAU0000002000894629` (53.9 km, unambiguous). l'Agout turned out
+      to be a mistake in the original config — it's a Tarn tributary near
+      Castres, outside the Pyrenees/Garonne study area entirely (confirmed
+      absent from the local dump). Swapped for l'Adour, the other major
+      Pyrenees-draining river, resolved the same way to
+      `COURDEAU0000002000898951` (334.0 km, unambiguous vs. its "Bras de
+      l'Adour" side channels).)
+      Follow-up: narrowed `bbox_wgs84` from `[-1.5, 42.0, 3.5, 43.5]`
+      (reached Toulouse) to `[-1.7, 42.0, 3.1, 43.15]` — a Pyrenees-only
+      band capped on the north at Lourdes / Saint-Girons latitude, per
+      explicit correction. La Garonne and l'Adour are scoped to their
+      Pyrenean headwaters, not their lowland course; both resolved ids
+      still fall inside the new bbox, no re-resolution needed.
+- [x] Decide + implement how the Makefile picks up the config: read
       `ROOT`/bbox from `study_area.yaml` by default, keep `TRONCONS ?=` /
       `ROOT ?=` as override-friendly `make` variables layered on top (so
       `make ROOT=... site` still works for one-off testing).
-- [ ] Once wired, either extend `roots` to support more than one build
+      (`ROOT ?=` now shells out to `python3 -c "from valleespyr.config import
+      load_study_area; print(load_study_area(...).roots[0].query)"` —
+      resolves to la Garonne's id by default, still overridable with `make
+      ROOT=<id> site`. Renamed the hardcoded `CATALOG` target from
+      `rioumajou_catalog.json` to `catalog.json` since it's no longer
+      Rioumajou-specific by default. `TRONCONS`/`BASSINS` still point at the
+      small existing dump (`[-0.82, 42.58, 0.68, 43.57]`), narrower than the
+      now-updated `study_area.yaml` bbox (`[-1.7, 42.0, 3.1, 43.15]`) —
+      today's build is a 355-tributary partial catchment limited to what's
+      in that dump, same limitation item 4 is meant to resolve by
+      re-dumping at the full study-area bbox. Verified with
+      `make site` + `http.server` + headless Chrome screenshot: tree and map
+      render la Garonne's 98 local rivers correctly, 53.86 km / order 7 /
+      2337.8 km² for the root segment.)
+- [x] Once wired, either extend `roots` to support more than one build
       target cleanly (a `make site` per root, or a `--all-roots` mode) or
       explicitly defer multi-root builds and note it as a known limitation.
+      (Went with all-roots-by-default, per explicit direction — comment out
+      a root in `study_area.yaml` to skip it, rather than a separate CLI
+      flag/mode. Added `RootRiver.slug` (`config.py`) to turn a name into a
+      filesystem-safe stand-in, e.g. "l'Adour" -> "adour". `make site` now
+      loops `study_area.yaml`'s `resolved_roots()`: the first root
+      (la Garonne) builds to `docs/index.html` as the site's front page,
+      every other root to its own `docs/<slug>/index.html` +
+      `catalog_index.json`, with `data/processed/<slug>.json` keeping their
+      intermediate catalogs from colliding. The loop is a shell `while read`
+      over a `_build_root` sub-make target, not a Make pattern rule, to
+      avoid fighting Make's static rule matching for a dynamically-shelled
+      root list. `make ROOT=<id> site` still overrides to a single build at
+      `docs/index.html`, bypassing the study-area list entirely (e.g. the
+      old Rioumajou test build). `site` is now .PHONY — always rebuilds all
+      roots on request rather than tracking per-root file timestamps, so
+      `make site` no longer no-ops when nothing changed (a deliberate
+      simplicity trade-off). `clean` now sweeps every `docs/**/index.html` +
+      `catalog_index.json` plus all of `data/processed/*.json`. Verified
+      both pages for real: la Garonne (99 local rivers) at `docs/index.html`
+      unchanged from before, l'Adour (202 local rivers, 333.97 km, 1071.3
+      km²) newly at `docs/l-adour/index.html` with its 3D terrain_url
+      correctly relative (`../terrain`) — both screenshotted via headless
+      Chrome + `http.server`. Added `tests/test_config.py::test_root_river_
+      slug` (accented-name case included: "l'Échez" -> "l-echez").)
 
 ## 3. Finish the vanilla-JS shell to match the current UI spec
 

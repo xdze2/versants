@@ -4,17 +4,18 @@
 # not elevation/relief-filtered).
 name: pyrenees-garonne
 description: >-
-  La Garonne catchment and the French Pyrenees it drains from — the bbox
-  fed to the WFS dump step, ahead of the river-graph / catalog build.
+  The French Pyrenees, capped on the north at Lourdes / Saint-Girons
+  latitude — covers la Garonne's and l'Adour's Pyrenean headwaters, not
+  their lowland course toward Toulouse or Bayonne. The bbox fed to the WFS
+  dump step, ahead of the river-graph / catalog build.
 
-# Covers the Garonne catchment (source in the central Pyrenees down through
-# Toulouse) plus the Pyrenean range generally, for future roots (e.g.
-# l'Agout, other Pyrenees-draining basins). Matches the extent implied by
-# the old dump's file name (troncon_hydrographique_pyrenees.parquet) and
-# the sample fixture's bbox (data/raw/troncon_hydrographique_gavarnie_sample,
-# a small corner of this area). Widen or split per-root if a single bbox
-# this large makes a WFS dump unwieldy.
-bbox_wgs84: [-1.5, 42.0, 3.5, 43.5]  # minx, miny, maxx, maxy (lon/lat)
+# Pyrenees-only band: French side of the range, from the Atlantic coast
+# near Bayonne to the Mediterranean near Perpignan, capped on the north at
+# Lourdes / Saint-Girons latitude rather than reaching up to Toulouse — la
+# Garonne and l'Adour are only tracked through their Pyrenean headwaters
+# here, not their full lowland course. Widen or split per-root if a single
+# bbox this large makes a WFS dump unwieldy.
+bbox_wgs84: [-1.7, 42.0, 3.1, 43.15]  # minx, miny, maxx, maxy (lon/lat)
 
 crs: EPSG:2154  # Lambert-93, working CRS
 
@@ -26,8 +27,17 @@ sources:
 # Root rivers to build a catalog for (name or stable cours_d_eau id — prefer
 # id once known, since the Makefile's comment notes name-matching is
 # ambiguous). Each becomes one `valleespyr catalog <root>` build.
+#
+# Ids resolved via `valleespyr hydro rivers show <name> --from-file ...`:
+# la Garonne against data/raw/troncon_hydrographique_pyrenees.parquet
+# (53.9 km, unambiguous vs. the unrelated "Ruisseau de la Garonne"); l'Adour
+# the same way (334.0 km, unambiguous vs. its "Bras de l'Adour" /
+# "l'Adour de Gripp" etc. side channels and tributaries). l'Agout (a Tarn
+# tributary near Castres, outside the Pyrenees/Garonne study area) was a
+# placeholder mistake in the original config — replaced with l'Adour, the
+# other major Pyrenees-draining river alongside la Garonne.
 roots:
   - name: la Garonne
-    cours_d_eau_id: null  # fill in once resolved, same pattern as the Makefile's ROOT
-  - name: l'Agout
-    cours_d_eau_id: null
+    cours_d_eau_id: COURDEAU0000002000894629
+  - name: l'Adour
+    cours_d_eau_id: COURDEAU0000002000898951

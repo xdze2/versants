@@ -72,3 +72,16 @@ def test_the_real_project_config_loads() -> None:
     area = load_study_area(Path(__file__).resolve().parent.parent / "config" / "study_area.yaml")
     assert area.name == "pyrenees-garonne"
     assert len(area.roots) == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "slug"),
+    [
+        ("la Garonne", "la-garonne"),
+        ("l'Adour", "l-adour"),
+        ("Neste de Rioumajou", "neste-de-rioumajou"),
+        ("l'Échez", "l-echez"),
+    ],
+)
+def test_root_river_slug(name: str, slug: str) -> None:
+    assert RootRiver(name=name, cours_d_eau_id="x").slug == slug

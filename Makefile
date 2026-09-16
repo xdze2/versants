@@ -1,6 +1,6 @@
 # valleespyr — build the static site published on GitHub Pages.
 #
-# The site is a single static page: one river catalog rendered as a
+# The site is one page per root river in config/study_area.yaml — each a
 # collapsible git-graph + a map column (IGN/OSM basemap tiles fetched live
 # for the 2D Leaflet fallback; a catalog built without --geo stays fully
 # self-contained). Selecting a river with a baked terrain file (see `make
@@ -8,10 +8,11 @@
 # baked IGN basemap drape instead. GitHub Pages serves it from docs/ on the
 # default branch.
 #
-#   make site      regenerate docs/index.html from the local tronçon dump
+#   make site      regenerate docs/index.html + docs/<root>/index.html per
+#                   root in study_area.yaml, from the local tronçon dump
 #   make terrain    bake per-river 3D terrain + IGN basemap into TERRAIN_DIR
 #   make preview    serve docs/ at http://localhost:8000
-#   make clean      remove the generated page
+#   make clean      remove the generated pages
 #
 # `make site` needs the raw BD TOPO tronçon dump locally (it is NOT in git —
 # ~29 MB). Point TRONCONS at it, or drop it at the default path below. Get one
@@ -26,43 +27,55 @@ DEM_CATCHMENTS ?= data/processed/catchments.json
 # though the file exists on disk.
 TERRAIN_DIR ?= docs/terrain
 
-# Neste de Rioumajou — resolved to its stable cours_d_eau id so `make site`
-# never trips over a name-ambiguity match. This is the only page the site
-# publishes; there is no separate 2D-only build anymore.
-ROOT ?= COURDEAU0000002000907013
+STUDY_AREA ?= config/study_area.yaml
 
-PAGE      := docs/index.html
-CATALOG   := data/processed/rioumajou_catalog.json
-PAGE_DATA := docs/catalog_index.json
+CATALOG_DIR := data/processed
 
 .PHONY: site terrain preview clean
 
-site: $(PAGE)
-
-# Regenerate whenever the source dump, the generator, or the renderer changes.
-# DEM_CATCHMENTS and TERRAIN_DIR are intentionally not prerequisites: neither
-# may exist yet (make site still works without them — see the --dem-catchments
-# and --terrain-dir guards below) and both are produced by separate, slow
-# batches (valley catchments precompute / terrain-precompute), not something
-# a plain `make site` should trigger.
-# `--html` also writes $(PAGE_DATA) alongside $(PAGE) (the JSON the shell
-# fetches on load) — not listed as an explicit target since both come from
-# the same `valleespyr catalog` invocation.
-$(PAGE): $(TRONCONS) $(BASSINS) \
-         src/valleespyr/catalog.py src/valleespyr/render/catalog_html.py \
-         src/valleespyr/render/static/catalog_3d.js
+# All resolved roots in study_area.yaml by default, one page each — comment
+# out a root in that file's `roots:` list to skip it. The first root
+# (currently la Garonne) is the site's front page (docs/index.html); every
+# other root gets its own docs/<slug>/index.html (slug from RootRiver.slug,
+# e.g. l'Adour -> docs/adour/). Override with `make ROOT=<id-or-name> site`
+# to build just one root to docs/index.html instead (e.g. the old Rioumajou
+# test build: `make ROOT=COURDEAU0000002000907013 site`).
+# `site` is .PHONY (declared above) so it always rebuilds every root on
+# request rather than tracking per-root file timestamps — simpler than a
+# pattern rule over a dynamically-shelled root list, at the cost of no
+# incremental skip when nothing changed.
+site:
 	@test -f "$(TRONCONS)" || { \
 	  echo "missing $(TRONCONS) — set TRONCONS=... (see Makefile header)"; exit 1; }
-	mkdir -p docs data/processed
-	uv run valleespyr catalog $(ROOT) \
+	mkdir -p docs $(CATALOG_DIR)
+ifdef ROOT
+	$(MAKE) --no-print-directory _build_root SLUG=catalog QUERY="$(ROOT)" DIR=docs
+else
+	@uv run python3 -c \
+	  "from valleespyr.config import load_study_area; \
+	  [print(r.slug, r.query) for r in load_study_area('$(STUDY_AREA)').resolved_roots()]" \
+	| { first=1; while read -r slug query; do \
+	      if [ "$$first" = 1 ]; then dir=docs; first=0; else dir="docs/$$slug"; fi; \
+	      $(MAKE) --no-print-directory _build_root SLUG="$$slug" QUERY="$$query" DIR="$$dir" || exit 1; \
+	    done; }
+endif
+
+# One catalog build: $(DIR) (default docs) gets index.html + catalog_index.json,
+# named after $(SLUG) in $(CATALOG_DIR) (data/processed/<slug>.json) so
+# multiple roots' catalog JSON don't collide.
+DIR ?= docs
+.PHONY: _build_root
+_build_root:
+	mkdir -p "$(DIR)"
+	uv run valleespyr catalog "$(QUERY)" \
 	  --from-file "$(TRONCONS)" \
 	  $(if $(wildcard $(BASSINS)),--bassins "$(BASSINS)",) \
 	  $(if $(wildcard $(DEM_CATCHMENTS)),--dem-catchments "$(DEM_CATCHMENTS)",) \
 	  $(if $(wildcard $(TERRAIN_DIR)),--terrain-dir "$(TERRAIN_DIR)",) \
 	  --geo \
-	  -o "$(CATALOG)" \
-	  --html "$(PAGE)"
-	@echo "built $(PAGE) and $(PAGE_DATA)"
+	  -o "$(CATALOG_DIR)/$(SLUG).json" \
+	  --html "$(DIR)/index.html"
+	@echo "built $(DIR)/index.html and $(DIR)/catalog_index.json"
 
 # Bakes one <river_id>.json (heightmap + streams + contours + IGN basemap)
 # per DEM-sourced river in DEM_CATCHMENTS. Slow and network-heavy (WMTS
@@ -75,10 +88,11 @@ terrain: $(DEM_CATCHMENTS)
 	  -o "$(TERRAIN_DIR)"
 	@echo "baked $(TERRAIN_DIR)/"
 
-preview: $(PAGE)
+preview: site
 	@echo "serving docs/ at http://localhost:8000  (Ctrl-C to stop)"
-	@echo "note: index.html fetches $(PAGE_DATA) — open it via this server, not file://"
+	@echo "note: each page fetches its own catalog_index.json — open via this server, not file://"
 	cd docs && python3 -m http.server 8000
 
 clean:
-	rm -f $(PAGE) $(PAGE_DATA) $(CATALOG)
+	find docs \( -name index.html -o -name catalog_index.json \) -delete
+	rm -f $(CATALOG_DIR)/*.json

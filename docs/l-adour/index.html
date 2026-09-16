@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>la Garonne — river catalog</title>
+<title>l&#x27;Adour — river catalog</title>
 <style>
 :root {
   --ink: #1b1b1b; --dim: #6b6b6b; --faint: #9a9a9a;
@@ -120,8 +120,8 @@ mark { background: #ffe9a8; color: inherit; }
 </head>
 <body>
 <header>
-  <h1>la Garonne</h1>
-  <div class="meta">catchment of <b>la Garonne</b> — a two-level local view of the river network: the selected river, its downstream link, its neighbours, and its sub-rivers<span id="meta-extra"></span> · click a row to select it</div>
+  <h1>l&#x27;Adour</h1>
+  <div class="meta">catchment of <b>l&#x27;Adour</b> — a two-level local view of the river network: the selected river, its downstream link, its neighbours, and its sub-rivers<span id="meta-extra"></span> · click a row to select it</div>
   <div class="controls">
     <input id="filter" type="search" placeholder="filter by name…" autocomplete="off">
   </div>
@@ -139,7 +139,7 @@ mark { background: #ffe9a8; color: inherit; }
 <script>// 3D map column: same window._catalogInitGeo/_catalogMapSelect/_catalogGeoSync
 // contract as catalog_map.js (the Leaflet version), built on three.js instead.
 // The selected river gets real DEM terrain (fetched lazily from
-// "terrain"/<river_id>.json, baked by `valley catchments
+// "../terrain"/<river_id>.json, baked by `valley catchments
 // terrain-precompute`); every other river in view is a flat footprint at its
 // true position/scale, traced from its own `catchment` polygon when it has
 // one. Clicking a footprint or a tree row flies the camera to the new
@@ -152,7 +152,7 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     if (!geo || !geo.rivers || !geo.bbox || !wrap || !cv || !window.THREE) return;
     document.body.classList.add('has-geo');
 
-    const TERRAIN_URL = "terrain";  // relative to this HTML file
+    const TERRAIN_URL = "../terrain";  // relative to this HTML file
     const loadingEl = document.getElementById('loading3d');
     const cap = document.getElementById('infobox');
 

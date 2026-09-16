@@ -9,6 +9,8 @@ into the Makefile is separate.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +40,16 @@ class RootRiver:
                 "config/study_area.yaml before using it as a catalog root"
             )
         return self.cours_d_eau_id
+
+    @property
+    def slug(self) -> str:
+        """A filesystem/URL-safe stand-in for ``name`` (e.g. "l'Adour" -> "adour").
+
+        Used to give each root's build its own output path under ``docs/``.
+        """
+        normalized = unicodedata.normalize("NFKD", self.name)
+        ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
+        return re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")
 
 
 @dataclass(frozen=True)
