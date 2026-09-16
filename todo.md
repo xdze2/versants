@@ -128,17 +128,55 @@ hover-preview, filter box in app_requirements.md §"User-facing features").
 Rebuilding it is blocked on data-out-of-HTML (item 1) landing first, since
 otherwise it's rework.
 
-- [ ] Tree selector: lanes (not indentation) — trunk lane runs unbroken,
+- [x] Tree selector: lanes (not indentation) — trunk lane runs unbroken,
       tributaries curve in at confluence, per app_requirements.md.
-- [ ] URL reflects selected river (linkable/bookmarkable, back/forward
+      (Already implemented pre-existing: `catalog_graph.js::drawGraph`.)
+- [x] URL reflects selected river (linkable/bookmarkable, back/forward
       works).
-- [ ] Text filter to jump to a river by name.
-- [ ] Hover preview (tree row ↔ map) before clicking.
-- [ ] Map masking: when drainage area is known and in the "reads as one
+      (Added to `catalog_graph.js`: `focusOn` now takes `{pushHash}` and
+      pushes `#<river_id>` via `history.pushState` on every user-driven
+      selection; a `popstate` listener restores the river named by the new
+      hash — or the root when the hash is empty — via
+      `focusOn(id, {pushHash: false})` so it doesn't re-push. Initial load
+      reads `location.hash` to select that river (falling back to
+      `meta.root_id`) and passes it through to `_catalogInitGeo` as a new
+      `initialId` param, consumed by both `catalog_map.js` and
+      `catalog_3d.js` so the map/3D column opens already framed on the
+      linked river instead of re-focusing the root and immediately
+      re-pushing a competing history entry. Verified end-to-end with a
+      scripted Chrome DevTools Protocol session: click-selects push a hash,
+      `history.back()`/`forward()` restore the right river and tree state,
+      and reloading with `#<id>` in the URL opens directly on that river
+      with correct breadcrumbs.)
+- [x] Text filter to jump to a river by name.
+      (Already implemented pre-existing: `catalog_graph.js::applyFilter`.)
+- [x] Hover preview (tree row ↔ map) before clicking.
+      (Added, as highlight-only per explicit direction — no camera move, no
+      infobox change, no terrain fetch on hover. Tree row → map/3D: row
+      `mouseover`/`mouseout` in `catalog_graph.js` call a new
+      `window._catalogMapPreview(id|null)`, implemented in `catalog_map.js`
+      as an amber polyline on a dedicated Leaflet `previewPane`, and in
+      `catalog_3d.js` as an amber footprint restyle (`FOOTPRINT_PREVIEW`)
+      alongside the existing selected/context colors. Map/3D → tree row:
+      hovering a context polyline (now tracked per-id in `ctxLines`) or a
+      3D footprint (new `pointermove`/`pointerleave` raycast in
+      `catalog_3d.js`) calls a new `window._catalogRowPreview(id|null)` in
+      `catalog_graph.js` that toggles a `.preview` CSS class on the matching
+      row. New `.labels .row.preview` style in `catalog_html.py`. Verified
+      via scripted CDP session: hovering a tree row triggers the map-side
+      preview call with no exceptions, and driving `_catalogRowPreview`
+      directly (standing in for the map/3D hover path) correctly adds/
+      removes `.preview` on the right row — screenshotted.)
+- [x] Map masking: when drainage area is known and in the "reads as one
       valley" range (~5–150 km²), mask outside the catchment boundary.
-- [ ] 3D view swap-in for valleys with baked `terrain.json`, lazy-loaded
-      per-selection (already largely working per README screenshots —
-      confirm it still works once data loading changes under item 1).
+      (Already implemented pre-existing: `catalog_map.js::paintMask`, gated
+      on `catalog.py`'s `_VALLEY_AREA_*` range.)
+- [x] 3D view swap-in for valleys with baked `terrain.json`, lazy-loaded
+      per-selection.
+      (Confirmed still working after item 1's fetch-based data loading:
+      rebuilt `docs/index.html` + `docs/l-adour/index.html` via `make site`
+      and screenshotted both in headless Chrome — terrain fetch, footprint
+      fallback for un-baked rivers, and orbit controls all work unchanged.)
 - [ ] Svelte decision: **deferred** (see app_design.md "Open question") —
       revisit only once the above UI shape has stopped changing. Don't
       start a Svelte migration before this list's items are otherwise done.

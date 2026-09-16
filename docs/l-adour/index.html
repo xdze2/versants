@@ -49,6 +49,7 @@ ol.labels { list-style: none; margin: 0; padding: 0; }
 .labels .row:hover { background: #fff; box-shadow: inset 0 0 0 1px var(--line); }
 .labels .row.selected-river { cursor: default; }
 .labels .row.selected-river .name { color: var(--accent); font-weight: 700; }
+.labels .row.preview { background: #fdf3e3; box-shadow: inset 0 0 0 1px #e8c99a; }
 .labels .row.back { color: var(--dim); }
 .labels .row.back .arrow { color: var(--faint); }
 .labels .row.back .hint { color: var(--faint); font-size: 11px; margin-left: 2px; }
@@ -144,7 +145,7 @@ mark { background: #ffe9a8; color: inherit; }
 // true position/scale, traced from its own `catchment` polygon when it has
 // one. Clicking a footprint or a tree row flies the camera to the new
 // river's outlet, looking upstream into its bowl.
-window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
+window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, initialId) {
   (function initGeo() {
     const geo = data.geo;
     const wrap = document.getElementById('map3d');
@@ -250,7 +251,7 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     // close enough that the eye still reads it as "this valley's base".
     const GROUND_Y = -1500;
 
-    const FOOTPRINT_COLOR = 0xdcd5c0, FOOTPRINT_HI = 0xc9dec2;
+    const FOOTPRINT_COLOR = 0xdcd5c0, FOOTPRINT_HI = 0xc9dec2, FOOTPRINT_PREVIEW = 0xe8c99a;
     for (const id in geo.rivers) {
       const g = geo.rivers[id];
       if (!g.catchment || !g.catchment.length) continue;
@@ -585,14 +586,20 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     }
 
     // ---- selection: fetch terrain (if any), fly, paint footprints ---------
+    let previewId = null;
+    function restyleFootprints() {
+      for (const fid in footprints) {
+        const isSel = fid === currentId;
+        const isPreview = !isSel && fid === previewId;
+        footprints[fid].material.color.setHex(isSel ? FOOTPRINT_HI : isPreview ? FOOTPRINT_PREVIEW : FOOTPRINT_COLOR);
+        footprints[fid].material.opacity = isSel ? 0.0 : isPreview ? 0.75 : 0.55;
+      }
+    }
     function paintMap(id) {
       const g = geo.rivers[id];
       if (!g) return;
       currentId = id;
-      for (const fid in footprints) {
-        footprints[fid].material.color.setHex(fid === id ? FOOTPRINT_HI : FOOTPRINT_COLOR);
-        footprints[fid].material.opacity = fid === id ? 0.0 : 0.55;
-      }
+      restyleFootprints();
       for (const bid in builtBlocks) {
         if (bid !== id) builtBlocks[bid].visible = false;
       }
@@ -657,6 +664,14 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     window._catalogGeoSync = syncSelectedRow;
     window._catalogMapSelect = paintMap;
 
+    // --- hover preview: highlight a footprint, no camera/selection change --
+    function paintPreview(id) {
+      if (previewId === id) return;
+      previewId = id;
+      restyleFootprints();
+    }
+    window._catalogMapPreview = paintPreview;
+
     // ---- input: orbit + click-to-select on a footprint ---------------------
     let dragDist = 0;
     {
@@ -678,17 +693,27 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     }
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
-    cv.addEventListener('click', (e) => {
-      if (dragDist > 6) return;
+    function footprintAt(e) {
       const rect = cv.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
       const hits = raycaster.intersectObjects(Object.values(footprints));
-      if (hits.length) {
-        const id = hits[0].object.userData.riverId;
-        if (id && id !== currentId) focusOn(id);
-      }
+      return hits.length ? hits[0].object.userData.riverId : null;
+    }
+    cv.addEventListener('click', (e) => {
+      if (dragDist > 6) return;
+      const id = footprintAt(e);
+      if (id && id !== currentId) focusOn(id);
+    });
+    cv.addEventListener('pointermove', (e) => {
+      const id = footprintAt(e);
+      paintPreview(id);
+      if (window._catalogRowPreview) window._catalogRowPreview(id);
+    });
+    cv.addEventListener('pointerleave', () => {
+      paintPreview(null);
+      if (window._catalogRowPreview) window._catalogRowPreview(null);
     });
 
     function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
@@ -753,7 +778,8 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       updateCompass();
     })();
 
-    if (geo.rivers[meta.root_id]) focusOn(meta.root_id);
+    const startId = (initialId && geo.rivers[initialId]) ? initialId : meta.root_id;
+    if (geo.rivers[startId]) focusOn(startId, { pushHash: false });
   })();
 };
 (function () {
@@ -991,14 +1017,27 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       if (window._catalogGeoSync) window._catalogGeoSync();
     }
 
-    // a selection changed (from the map, a row, or a crumb)
-    function focusOn(id) {
+    // a selection changed (from the map, a row, or a crumb) — reflected in
+    // the URL hash so a valley is linkable/bookmarkable and back/forward
+    // navigation works. `pushHash: false` is used for the popstate handler
+    // below, which must not re-push the entry it's already navigating to.
+    function focusOn(id, { pushHash = true } = {}) {
       if (!nodeById[id]) return;
       selectedId = id;
+      if (pushHash) {
+        const hash = '#' + encodeURIComponent(id);
+        if (location.hash !== hash) history.pushState(null, '', hash);
+      }
       if (window._catalogMapSelect) window._catalogMapSelect(id);
       render();
     }
     window._catalogFocusOn = focusOn;
+
+    addEventListener('popstate', () => {
+      const hashId = decodeURIComponent((location.hash || '').slice(1));
+      const id = (hashId && nodeById[hashId]) ? hashId : root.id;
+      focusOn(id, { pushHash: false });
+    });
 
     if (crumbEl) crumbEl.addEventListener('click', ev => {
       const a = ev.target.closest('a[data-id]');
@@ -1011,6 +1050,30 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       const li = ev.target.closest('.row[data-id]');
       if (li && li.dataset.id && nodeById[li.dataset.id]) focusOn(li.dataset.id);
     });
+
+    // --- hover preview: highlight only, no camera/selection change ---------
+    // Tree row -> map: highlight that river's line/footprint.
+    labelsEl.addEventListener('mouseover', ev => {
+      const li = ev.target.closest('.row[data-id]');
+      if (li && li.dataset.id && nodeById[li.dataset.id] && window._catalogMapPreview) {
+        window._catalogMapPreview(li.dataset.id);
+      }
+    });
+    labelsEl.addEventListener('mouseout', ev => {
+      const li = ev.target.closest('.row[data-id]');
+      if (li && !li.contains(ev.relatedTarget) && window._catalogMapPreview) {
+        window._catalogMapPreview(null);
+      }
+    });
+    // Map -> tree row: highlight the row for the hovered river (set by the
+    // geo script via window._catalogRowPreview).
+    let previewRow = null;
+    window._catalogRowPreview = function (id) {
+      if (previewRow) { previewRow.classList.remove('preview'); previewRow = null; }
+      if (!id) return;
+      const li = labelsEl.querySelector('.row[data-id="' + id.replace(/"/g, '\\"') + '"]');
+      if (li) { li.classList.add('preview'); previewRow = li; }
+    };
 
     // --- name filter (hides rows) ------------------------------------------
     function applyFilter() {
@@ -1031,8 +1094,11 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     }
     filterEl.addEventListener('input', applyFilter);
 
+    const hashId = decodeURIComponent((location.hash || '').slice(1));
+    const initialId = (hashId && nodeById[hashId]) ? hashId : meta.root_id;
+    if (hashId && nodeById[hashId]) selectedId = hashId;
     render();
-    if (window._catalogInitGeo) window._catalogInitGeo(data, root, meta, labelsEl, esc, focusOn);
+    if (window._catalogInitGeo) window._catalogInitGeo(data, root, meta, labelsEl, esc, focusOn, initialId);
   }
 })();
 </script>

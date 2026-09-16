@@ -1,4 +1,4 @@
-window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
+window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, initialId) {
   (function initGeo() {
     const geo = data.geo;
     const mapEl = document.getElementById('map');
@@ -60,16 +60,21 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     let maskLayer = null;
     const ctxPane = L.featureGroup().addTo(map);
     const hiPane = L.featureGroup().addTo(map);
+    const previewPane = L.featureGroup().addTo(map);
 
     function toLatLngs(subs) {
       return subs.map(sub => sub.map(([lon, lat]) => [lat, lon]));
     }
 
+    const ctxLines = {};  // id -> Leaflet polyline, for hover restyle + hover-out map->tree
     for (const id in geo.rivers) {
-      L.polyline(toLatLngs(geo.rivers[id].line), {
+      const line = L.polyline(toLatLngs(geo.rivers[id].line), {
         color: '#7c8894', weight: mapWidth((node[id] || {}).strahler),
         opacity: 0.55, lineCap: 'round', lineJoin: 'round',
       }).addTo(ctxPane);
+      ctxLines[id] = line;
+      line.on('mouseover', () => { if (window._catalogRowPreview) window._catalogRowPreview(id); });
+      line.on('mouseout', () => { if (window._catalogRowPreview) window._catalogRowPreview(null); });
     }
 
     const cap = document.getElementById('infobox');
@@ -170,6 +175,22 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
     window._catalogGeoSync = syncSelectedRow;
     window._catalogMapSelect = paintMap;
 
+    // --- hover preview: highlight a river's line, no camera/selection change
+    let previewId = null;
+    function paintPreview(id) {
+      if (previewId === id) return;
+      previewId = id;
+      previewPane.clearLayers();
+      if (!id || id === currentId) return;
+      const g = geo.rivers[id];
+      if (!g) return;
+      L.polyline(toLatLngs(g.line), {
+        color: '#a5682f', weight: mapWidth((node[id] || {}).strahler, 1.5),
+        opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false,
+      }).addTo(previewPane);
+    }
+    window._catalogMapPreview = paintPreview;
+
     // --- layer switcher UI: basemap radios + hillshade toggle -----------
     const baseRadios = document.querySelectorAll('input[name="maplayer"]');
     baseRadios.forEach(r => r.addEventListener('change', () => {
@@ -183,6 +204,7 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn) {
       else map.removeLayer(hillshade);
     });
 
-    if (geo.rivers[meta.root_id]) focusOn(meta.root_id);
+    const startId = (initialId && geo.rivers[initialId]) ? initialId : meta.root_id;
+    if (geo.rivers[startId]) focusOn(startId, { pushHash: false });
   })();
 };

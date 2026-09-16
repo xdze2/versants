@@ -106,6 +106,7 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .labels .row:hover {{ background: #fff; box-shadow: inset 0 0 0 1px var(--line); }}
 .labels .row.selected-river {{ cursor: default; }}
 .labels .row.selected-river .name {{ color: var(--accent); font-weight: 700; }}
+.labels .row.preview {{ background: #fdf3e3; box-shadow: inset 0 0 0 1px #e8c99a; }}
 .labels .row.back {{ color: var(--dim); }}
 .labels .row.back .arrow {{ color: var(--faint); }}
 .labels .row.back .hint {{ color: var(--faint); font-size: 11px; margin-left: 2px; }}

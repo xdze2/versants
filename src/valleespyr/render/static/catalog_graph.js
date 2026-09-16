@@ -233,14 +233,27 @@
       if (window._catalogGeoSync) window._catalogGeoSync();
     }
 
-    // a selection changed (from the map, a row, or a crumb)
-    function focusOn(id) {
+    // a selection changed (from the map, a row, or a crumb) — reflected in
+    // the URL hash so a valley is linkable/bookmarkable and back/forward
+    // navigation works. `pushHash: false` is used for the popstate handler
+    // below, which must not re-push the entry it's already navigating to.
+    function focusOn(id, { pushHash = true } = {}) {
       if (!nodeById[id]) return;
       selectedId = id;
+      if (pushHash) {
+        const hash = '#' + encodeURIComponent(id);
+        if (location.hash !== hash) history.pushState(null, '', hash);
+      }
       if (window._catalogMapSelect) window._catalogMapSelect(id);
       render();
     }
     window._catalogFocusOn = focusOn;
+
+    addEventListener('popstate', () => {
+      const hashId = decodeURIComponent((location.hash || '').slice(1));
+      const id = (hashId && nodeById[hashId]) ? hashId : root.id;
+      focusOn(id, { pushHash: false });
+    });
 
     if (crumbEl) crumbEl.addEventListener('click', ev => {
       const a = ev.target.closest('a[data-id]');
@@ -253,6 +266,30 @@
       const li = ev.target.closest('.row[data-id]');
       if (li && li.dataset.id && nodeById[li.dataset.id]) focusOn(li.dataset.id);
     });
+
+    // --- hover preview: highlight only, no camera/selection change ---------
+    // Tree row -> map: highlight that river's line/footprint.
+    labelsEl.addEventListener('mouseover', ev => {
+      const li = ev.target.closest('.row[data-id]');
+      if (li && li.dataset.id && nodeById[li.dataset.id] && window._catalogMapPreview) {
+        window._catalogMapPreview(li.dataset.id);
+      }
+    });
+    labelsEl.addEventListener('mouseout', ev => {
+      const li = ev.target.closest('.row[data-id]');
+      if (li && !li.contains(ev.relatedTarget) && window._catalogMapPreview) {
+        window._catalogMapPreview(null);
+      }
+    });
+    // Map -> tree row: highlight the row for the hovered river (set by the
+    // geo script via window._catalogRowPreview).
+    let previewRow = null;
+    window._catalogRowPreview = function (id) {
+      if (previewRow) { previewRow.classList.remove('preview'); previewRow = null; }
+      if (!id) return;
+      const li = labelsEl.querySelector('.row[data-id="' + id.replace(/"/g, '\\"') + '"]');
+      if (li) { li.classList.add('preview'); previewRow = li; }
+    };
 
     // --- name filter (hides rows) ------------------------------------------
     function applyFilter() {
@@ -273,7 +310,10 @@
     }
     filterEl.addEventListener('input', applyFilter);
 
+    const hashId = decodeURIComponent((location.hash || '').slice(1));
+    const initialId = (hashId && nodeById[hashId]) ? hashId : meta.root_id;
+    if (hashId && nodeById[hashId]) selectedId = hashId;
     render();
-    if (window._catalogInitGeo) window._catalogInitGeo(data, root, meta, labelsEl, esc, focusOn);
+    if (window._catalogInitGeo) window._catalogInitGeo(data, root, meta, labelsEl, esc, focusOn, initialId);
   }
 })();
