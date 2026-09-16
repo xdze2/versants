@@ -17,8 +17,6 @@
 
     const graphSvg = document.getElementById('graph');
     const labelsEl = document.getElementById('labels');
-    const metaExtra = document.getElementById('meta-extra');
-    const filterEl = document.getElementById('filter');
     const crumbEl = document.getElementById('crumbs');
 
     // index every node by id, and record each node's parent + ordered
@@ -224,12 +222,6 @@
       labelsEl.innerHTML = rows.map(rowHtml).join('');
       drawGraph(rows);
       drawCrumbs();
-      applyFilter();
-
-      const sel = nodeById[selectedId] || root;
-      let note = '';
-      if (sel.n_upstream) note = ' · ' + sel.n_upstream + ' rivers upstream';
-      metaExtra.textContent = note;
       if (window._catalogGeoSync) window._catalogGeoSync();
     }
 
@@ -290,25 +282,6 @@
       const li = labelsEl.querySelector('.row[data-id="' + id.replace(/"/g, '\\"') + '"]');
       if (li) { li.classList.add('preview'); previewRow = li; }
     };
-
-    // --- name filter (hides rows) ------------------------------------------
-    function applyFilter() {
-      const t = (filterEl.value || '').trim().toLowerCase();
-      for (const li of labelsEl.querySelectorAll('.row[data-id]')) {
-        const nameEl = li.querySelector('.name');
-        const raw = nameEl ? nameEl.textContent : '';
-        if (nameEl) nameEl.textContent = raw;
-        if (!t) { li.classList.remove('hidden'); continue; }
-        const i = raw.toLowerCase().indexOf(t);
-        if (i < 0) { li.classList.add('hidden'); continue; }
-        li.classList.remove('hidden');
-        if (nameEl) {
-          nameEl.innerHTML = esc(raw.slice(0, i)) + '<mark>' +
-            esc(raw.slice(i, i + t.length)) + '</mark>' + esc(raw.slice(i + t.length));
-        }
-      }
-    }
-    filterEl.addEventListener('input', applyFilter);
 
     const hashId = decodeURIComponent((location.hash || '').slice(1));
     const initialId = (hashId && nodeById[hashId]) ? hashId : meta.root_id;

@@ -30,7 +30,6 @@ from typing import Any
 
 # Mini-map (only with a geo block).
 MAP_MIN = 340       # px — floor for the map column on narrow windows
-MAP_MAX_VW = 75     # % of window width — ceiling for the map column
 MAP_H = 560         # px — fixed height of the Leaflet map viewport
 LEAFLET_VERSION = "1.9.4"
 
@@ -39,7 +38,7 @@ LEAFLET_VERSION = "1.9.4"
 # child), 1 is where every sibling or tributary draws its own short "o--"
 # branch stub off the trunk at its own row. A river with 50 tributaries
 # costs the same width as one with two — nothing scales with fan-out.
-ROW_H = 30          # px per row — matches .labels .row's own height
+ROW_H = 26          # px per row — matches .labels .row's own height
 LANE_W = 15         # px per lane column
 LANE_PAD = 10       # left padding before lane 0
 DOT_R = 3.2         # merge/branch dot radius
@@ -72,37 +71,43 @@ body {{
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }}
 header {{
-  padding: 18px 22px 12px; border-bottom: 1px solid var(--line);
+  padding: 10px 22px; border-bottom: 1px solid var(--line);
   position: sticky; top: 0; background: var(--bg); z-index: 3;
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
 }}
-h1 {{ margin: 0 0 2px; font-size: 17px; font-weight: 600; }}
+.header-text {{
+  flex: 1 1 auto; min-width: 200px;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}}
+h1 {{ margin: 0; font-size: 17px; font-weight: 600; }}
+h1::after {{ content: "·"; margin-left: 8px; color: var(--line); font-weight: 400; }}
 .meta {{ color: var(--dim); font-size: 12px; }}
-.controls {{ margin-top: 9px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }}
-.controls input[type=search] {{
-  padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px;
-  font: inherit; min-width: 200px; background: #fff;
-}}
-.crumbs {{ margin-top: 8px; font-size: 12px; color: var(--faint); min-height: 18px; }}
-.crumbs:empty {{ display: none; }}
+.crumbs {{ font-size: 12px; color: var(--faint); flex: 0 0 100%; }}
+.crumbs:empty {{ display: none; flex-basis: 0; }}
 .crumbs a {{ color: var(--dim); text-decoration: none; }}
 .crumbs a:hover {{ color: var(--accent); text-decoration: underline; }}
 .crumbs b {{ color: var(--ink); font-weight: 600; }}
-.crumbs .sep {{ margin: 0 5px; color: var(--line); }}
+.crumbs .sep {{ margin: 0 5px; color: var(--faint); }}
 
 main {{ padding: 8px 22px 60px; }}
 .graphwrap {{
-  position: relative; display: grid;
-  grid-template-columns: {grid_cols}; align-items: start;
+  position: relative; display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
 }}
-.treecol {{ display: grid; grid-template-columns: {lane_w}px 1fr; align-items: start; }}
+.graphwrap > .mapcol {{ flex: 1 1 {map_min}px; min-width: {map_min}px; }}
+.treecol {{
+  display: grid; grid-template-columns: {lane_w}px 1fr; align-items: start;
+  width: 280px; flex: 0 0 auto;
+}}
 .treewrap {{ overflow-x: auto; overflow-y: hidden; }}
 svg.graph {{ display: block; }}
-ol.labels {{ list-style: none; margin: 0; padding: 0; }}
+ol.labels {{ list-style: none; margin: 0; padding: 0; min-width: 0; }}
 .labels .row {{
   display: flex; align-items: center; gap: 8px; height: {row_h}px;
   padding: 0 10px; white-space: nowrap; cursor: pointer;
-  border-radius: 6px;
+  border-radius: 6px; overflow: hidden; text-overflow: ellipsis;
 }}
+.labels .row .name {{ overflow: hidden; text-overflow: ellipsis; }}
+.labels .row.back .hint, .labels .row .more {{ flex: 0 0 auto; }}
 .labels .row:hover {{ background: #fff; box-shadow: inset 0 0 0 1px var(--line); }}
 .labels .row.selected-river {{ cursor: default; }}
 .labels .row.selected-river .name {{ color: var(--accent); font-weight: 700; }}
@@ -116,8 +121,8 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 
 .mapcol {{ position: sticky; top: {map_top}px; align-self: start; }}
 .mapcard {{
-  border: 1px solid var(--line); border-radius: 8px; background: #fff;
-  overflow: hidden; width: 100%;
+  position: relative; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; overflow: hidden; width: 100%;
 }}
 #map {{ display: block; width: 100%; height: {map_h}px; background: #dde3e7; }}
 #map .leaflet-container {{ font: inherit; background: #dde3e7; }}
@@ -147,8 +152,12 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .maplayers label {{ display: flex; gap: 5px; align-items: center; cursor: pointer; }}
 .maplayers .sep {{ width: 1px; height: 13px; background: var(--line); }}
 .infobox {{
-  padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12px;
-  color: var(--dim); line-height: 1.5; min-height: 34px;
+  position: absolute; right: 10px; bottom: 10px; z-index: 2;
+  max-width: min(78%, 320px);
+  padding: 9px 11px; border-radius: 8px; font-size: 12px;
+  color: var(--dim); line-height: 1.5;
+  background: rgba(255, 255, 255, 0.88); backdrop-filter: blur(3px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.06);
 }}
 .infobox .hint {{ color: var(--faint); }}
 .infobox .title {{
@@ -159,8 +168,8 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
   white-space: nowrap; margin-left: auto; }}
 .infobox .title a:hover {{ text-decoration: underline; }}
 .infobox .stats {{
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: 6px 14px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  gap: 4px 12px;
 }}
 .infobox .stat {{ display: flex; flex-direction: column; }}
 .infobox .stat .v {{ color: var(--ink); font-variant-numeric: tabular-nums;
@@ -171,8 +180,6 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; }}
 .name {{ font-weight: 600; }}
 .more {{ color: var(--faint); font-size: 11px; }}
 .also {{ color: #a5682f; font-size: 11px; }}
-.row.hidden {{ display: none; }}
-mark {{ background: #ffe9a8; color: inherit; }}
 """
 
 # Everything in these two files runs in the browser. catalog_graph.js owns
@@ -223,8 +230,6 @@ def catalog_to_html(
     use_3d = has_geo and terrain_url is not None
 
     if has_geo and not use_3d:
-        map_w_css = f"clamp({MAP_MIN}px, 60vw, {MAP_MAX_VW}vw)"
-        rest_cols = f"minmax(160px, 1fr) {map_w_css}"
         map_col = (
             f'<div class="mapcol"><div class="mapcard">'
             f'<div class="maplayers">'
@@ -238,8 +243,6 @@ def catalog_to_html(
             f"</div></div>"
         )
     elif use_3d:
-        map_w_css = f"clamp({MAP_MIN}px, 60vw, {MAP_MAX_VW}vw)"
-        rest_cols = f"minmax(160px, 1fr) {map_w_css}"
         map_col = (
             f'<div class="mapcol"><div class="mapcard">'
             f'<div id="map3d" aria-label="selected river in 3D">'
@@ -250,23 +253,16 @@ def catalog_to_html(
             f"</div></div>"
         )
     else:
-        rest_cols = "1fr"
         map_col = ""
 
-    metaline = (
-        f"catchment of <b>{html.escape(title)}</b> — a two-level local view of "
-        f"the river network: the selected river, its downstream link, its "
-        f"neighbours, and its sub-rivers"
-        f'<span id="meta-extra"></span>'
-        + (" · click a row or the map to select it" if has_geo else " · click a row to re-center")
-    )
+    metaline = "Explore the Pyrenees valley by valley"
 
     lane_w = LANE_PAD + N_LANES * LANE_W
 
     css = _CSS_TMPL.format(
-        grid_cols=rest_cols,
-        map_top=128,
+        map_top=88,
         map_h=MAP_H,
+        map_min=MAP_MIN,
         lane_w=lane_w,
         row_h=ROW_H,
     )
@@ -307,22 +303,21 @@ def catalog_to_html(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(title)} — river catalog</title>
+<title>Versant — {html.escape(title)}</title>
 <style>{css}</style>
 {leaflet_head}
 </head>
 <body>
 <header>
-  <h1>{html.escape(title)}</h1>
-  <div class="meta">{metaline}</div>
-  <div class="controls">
-    <input id="filter" type="search" placeholder="filter by name…" autocomplete="off">
+  <div class="header-text">
+    <h1>Versant</h1>
+    <div class="meta">{metaline}</div>
   </div>
   <div id="crumbs" class="crumbs"></div>
 </header>
 <main>
   <div class="graphwrap">
-    <div class="treecol">
+    <div id="treecol" class="treecol">
       <div class="treewrap"><svg id="graph" class="graph" width="1" height="1" viewBox="0 0 1 1" aria-hidden="true"></svg></div>
       <ol id="labels" class="labels"></ol>
     </div>
