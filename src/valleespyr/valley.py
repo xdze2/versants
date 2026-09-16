@@ -131,10 +131,11 @@ def outlet_point(rn: RiverNetwork, river_id: str) -> tuple[float, float]:
     troncons = rn._troncons
     segs = river.segments
     # This river's edges, and its outflow nodes (a segment tail that is no
-    # segment's head) as the fallback set of candidate mouths.
-    river_edges = [
-        (u, v, d) for u, v, d in troncons.edges(data=True) if d.get("cleabs") in segs
-    ]
+    # segment's head) as the fallback set of candidate mouths. Read from the
+    # precomputed per-river index rather than scanning every tronçon edge —
+    # this runs once per river in a catalog build, so a full-graph scan here
+    # made that O(rivers * total_edges).
+    river_edges = rn._edges_by_river.get(river_id, [])
     if not river_edges:
         raise RuntimeError(f"river {river_id!r} has no tronçon geometry")
     heads = {u for u, _v, _d in river_edges}
@@ -221,7 +222,7 @@ def upstream_offset_point(
 
     troncons = rn._troncons
     segs = river.segments
-    river_edges = [(u, v, d) for u, v, d in troncons.edges(data=True) if d.get("cleabs") in segs]
+    river_edges = rn._edges_by_river.get(river_id, [])
     if not river_edges:
         raise RuntimeError(f"river {river_id!r} has no tronçon geometry")
     heads = {u for u, _v, _d in river_edges}

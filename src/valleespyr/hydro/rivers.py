@@ -100,6 +100,14 @@ class RiverNetwork:
     segment_to_river: dict[str, str]
     #: the underlying downstream-pointing tronçon graph (kept for geometry work)
     _troncons: nx.DiGraph
+    #: river id -> its own (u, v, data) edges, precomputed once so per-river
+    #: geometry/outlet lookups don't each re-scan every tronçon edge (see
+    #: valley.outlet_point / _segments_geojson, which used to be O(rivers *
+    #: total_edges) — a 62k-edge graph times ~100 rivers was ~20s alone).
+    _edges_by_river: dict[str, list[tuple[str, str, dict]]]
+    #: cleabs -> (u, v, data), for looking up an arbitrary segment-id set (e.g.
+    #: a whole catchment spanning many rivers) without re-scanning all edges.
+    _edge_by_cleabs: dict[str, tuple[str, str, dict]]
 
     # ------------------------------------------------------------------ lookups
 
@@ -178,7 +186,7 @@ class RiverNetwork:
     def river_path_geojson(self, river_id: str) -> dict[str, Any]:
         """GeoJSON ``FeatureCollection`` of the river's tronçon lines."""
         return _segments_geojson(
-            self._troncons, self._segment_edges(river_id), river=self.rivers.get(river_id)
+            self._edge_by_cleabs, self._segment_edges(river_id), river=self.rivers.get(river_id)
         )
 
     def catchment_segments(self, river_id: str) -> set[str]:
@@ -206,7 +214,7 @@ class RiverNetwork:
         r = self.rivers.get(river_id)
         if r is None:
             return {"type": "FeatureCollection", "features": []}
-        return _segments_geojson(self._troncons, self.catchment_segments(river_id), river=r)
+        return _segments_geojson(self._edge_by_cleabs, self.catchment_segments(river_id), river=r)
 
     # ----------------------------------------------------------------- internals
 
@@ -420,11 +428,23 @@ def build_river_network(
         )
         rivers[rid].parent_id = succs[0] if succs else None
 
+    edges_by_river: dict[str, list[tuple[str, str, dict]]] = {rid: [] for rid in rivers}
+    edge_by_cleabs: dict[str, tuple[str, str, dict]] = {}
+    for u, v, data in troncons.edges(data=True):
+        cid = data.get("cleabs")
+        if cid is not None:
+            edge_by_cleabs[cid] = (u, v, data)
+        rid = segment_to_river.get(cid)
+        if rid is not None:
+            edges_by_river[rid].append((u, v, data))
+
     return RiverNetwork(
         rivers=rivers,
         graph=rg,
         segment_to_river=segment_to_river,
         _troncons=troncons,
+        _edges_by_river=edges_by_river,
+        _edge_by_cleabs=edge_by_cleabs,
     )
 
 
@@ -550,7 +570,7 @@ def _pick_outlet(
 
 
 def _segments_geojson(
-    troncons: nx.DiGraph,
+    edge_by_cleabs: dict[str, tuple[str, str, dict]],
     edge_ids: set[str],
     *,
     river: River | None = None,
@@ -558,16 +578,19 @@ def _segments_geojson(
     """Line ``FeatureCollection`` for a set of segment ``cleabs``.
 
     Reads geometries straight off the tronçon graph edges (they are shapely
-    objects put there by :func:`build_graph`); skips any without geometry.
+    objects put there by :func:`build_graph`), via the precomputed
+    ``cleabs -> edge`` index rather than scanning every tronçon edge for each
+    call — this runs once per river (or per catchment), so a linear scan here
+    made building a catalog O(rivers * total_edges).
     """
     from shapely.geometry import mapping
 
-    wanted = set(edge_ids)
     features = []
-    for _u, _v, data in troncons.edges(data=True):
-        cid = data.get("cleabs")
-        if cid not in wanted:
+    for cid in edge_ids:
+        edge = edge_by_cleabs.get(cid)
+        if edge is None:
             continue
+        _u, _v, data = edge
         geom = data.get("geometry")
         if geom is None:
             continue

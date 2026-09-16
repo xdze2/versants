@@ -47,17 +47,28 @@ CATALOG_DIR := data/processed
 site:
 	@test -f "$(TRONCONS)" || { \
 	  echo "missing $(TRONCONS) — set TRONCONS=... (see Makefile header)"; exit 1; }
+	@echo "== make site: TRONCONS=$(TRONCONS)"
 	mkdir -p docs $(CATALOG_DIR)
 ifdef ROOT
+	@echo "== building single root $(ROOT) -> docs/"
 	$(MAKE) --no-print-directory _build_root SLUG=catalog QUERY="$(ROOT)" DIR=docs
 else
 	@uv run python3 -c \
 	  "from valleespyr.config import load_study_area; \
 	  [print(r.slug, r.query) for r in load_study_area('$(STUDY_AREA)').resolved_roots()]" \
-	| { first=1; while read -r slug query; do \
-	      if [ "$$first" = 1 ]; then dir=docs; first=0; else dir="docs/$$slug"; fi; \
-	      $(MAKE) --no-print-directory _build_root SLUG="$$slug" QUERY="$$query" DIR="$$dir" || exit 1; \
-	    done; }
+	> /tmp/valleespyr_roots.$$$$; \
+	n=$$(wc -l < /tmp/valleespyr_roots.$$$$); \
+	echo "== $$n root(s) from $(STUDY_AREA)"; \
+	i=0; first=1; \
+	while read -r slug query; do \
+	  i=$$((i + 1)); \
+	  if [ "$$first" = 1 ]; then dir=docs; first=0; else dir="docs/$$slug"; fi; \
+	  echo "== [$$i/$$n] building $$slug ($$query) -> $$dir/"; \
+	  $(MAKE) --no-print-directory _build_root SLUG="$$slug" QUERY="$$query" DIR="$$dir" \
+	    || { rm -f /tmp/valleespyr_roots.$$$$; exit 1; }; \
+	done < /tmp/valleespyr_roots.$$$$; \
+	rm -f /tmp/valleespyr_roots.$$$$; \
+	echo "== make site: done ($$n root(s))"
 endif
 
 # One catalog build: $(DIR) (default docs) gets index.html + catalog_index.json,
@@ -88,10 +99,23 @@ terrain: $(DEM_CATCHMENTS)
 	  -o "$(TERRAIN_DIR)"
 	@echo "baked $(TERRAIN_DIR)/"
 
-preview: site
-	@echo "serving docs/ at http://localhost:8000  (Ctrl-C to stop)"
+# Skips the rebuild when docs/index.html already looks up to date — `site`
+# itself stays .PHONY (always rebuilds on direct request), but re-running
+# `make preview` repeatedly (the common case: tweak, look, tweak, look)
+# shouldn't re-walk the whole tronçon network each time. "Up to date" means
+# newer than the raw data, the study-area config, and the renderer's own
+# source (Python + the static JS/CSS it inlines) — anything narrower risks a
+# silently stale preview after an unrelated code change.
+PREVIEW_DEPS := $(TRONCONS) $(STUDY_AREA) \
+  $(wildcard src/valleespyr/render/*.py src/valleespyr/render/static/*.js \
+             src/valleespyr/*.py src/valleespyr/hydro/*.py)
+preview: docs/index.html
+	@echo "== serving docs/ at http://localhost:8000  (Ctrl-C to stop)"
 	@echo "note: each page fetches its own catalog_index.json — open via this server, not file://"
 	cd docs && python3 -m http.server 8000
+
+docs/index.html: $(PREVIEW_DEPS)
+	$(MAKE) --no-print-directory site
 
 clean:
 	find docs \( -name index.html -o -name catalog_index.json \) -delete
