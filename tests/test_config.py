@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from valleespyr.config import RootRiver, load_study_area
+from valleespyr.config import (
+    RootRiver,
+    load_study_area,
+    load_valley_overrides,
+    load_valley_overrides_if_present,
+)
 
 _YAML = """
 name: test-area
@@ -85,3 +90,44 @@ def test_the_real_project_config_loads() -> None:
 )
 def test_root_river_slug(name: str, slug: str) -> None:
     assert RootRiver(name=name, cours_d_eau_id="x").slug == slug
+
+
+_OVERRIDES_YAML = """
+rivers:
+  COURDEAU0000002000905987:
+    camera:
+      azimuth_deg: 200
+      elevation_deg: 25
+      distance_m: 4000
+      target_height_m: 250
+  COURDEAU0000002000000001:
+    blacklist: true
+"""
+
+
+def test_load_valley_overrides_parses_rivers(tmp_path: Path) -> None:
+    path = tmp_path / "valley_overrides.yaml"
+    path.write_text(_OVERRIDES_YAML, encoding="utf-8")
+
+    overrides = load_valley_overrides(path)
+
+    assert overrides["COURDEAU0000002000905987"]["camera"]["azimuth_deg"] == 200
+    assert overrides["COURDEAU0000002000000001"]["blacklist"] is True
+
+
+def test_load_valley_overrides_empty_file(tmp_path: Path) -> None:
+    path = tmp_path / "valley_overrides.yaml"
+    path.write_text("rivers: {}\n", encoding="utf-8")
+
+    assert load_valley_overrides(path) == {}
+
+
+def test_load_valley_overrides_if_present_missing(tmp_path: Path) -> None:
+    assert load_valley_overrides_if_present(tmp_path / "nope.yaml") is None
+
+
+def test_the_real_project_valley_overrides_loads() -> None:
+    """config/valley_overrides.yaml itself should always parse."""
+    path = Path(__file__).resolve().parent.parent / "config" / "valley_overrides.yaml"
+    overrides = load_valley_overrides(path)
+    assert "COURDEAU0000002000905987" in overrides

@@ -81,6 +81,36 @@ def load_study_area(path: str | Path = DEFAULT_CONFIG_PATH) -> StudyArea:
     return _from_dict(data, path)
 
 
+DEFAULT_VALLEY_OVERRIDES_PATH = Path("config/valley_overrides.yaml")
+
+
+def load_valley_overrides(
+    path: str | Path = DEFAULT_VALLEY_OVERRIDES_PATH,
+) -> dict[str, dict[str, Any]]:
+    """Parse ``config/valley_overrides.yaml`` into ``{cours_d_eau_id: {...}}``.
+
+    Hand-curated per-river data that doesn't belong in ``study_area.yaml``
+    (which only lists catalog *roots*) and can't be computed from the WFS/DEM
+    pipeline: a ``camera`` override for the 3D view's initial shot, a
+    ``blacklist`` flag to drop a river (and its upstream) from the tree, and
+    room for future curated fields (see the file's header comment). Consumed
+    by :func:`valleespyr.catalog.build_catalog` as its ``overrides`` param.
+    """
+    path = Path(path)
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("rivers", {})
+
+
+def load_valley_overrides_if_present(
+    path: str | Path = DEFAULT_VALLEY_OVERRIDES_PATH,
+) -> dict[str, dict[str, Any]] | None:
+    """Like :func:`load_valley_overrides`, but ``None`` if ``path`` doesn't exist."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    return load_valley_overrides(path)
+
+
 def load_study_area_if_present(path: str | Path = DEFAULT_CONFIG_PATH) -> StudyArea | None:
     """Like :func:`load_study_area`, but ``None`` if ``path`` doesn't exist.
 

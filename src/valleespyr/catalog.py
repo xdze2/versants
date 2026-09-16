@@ -130,6 +130,7 @@ def build_catalog(
     max_depth: int | None = None,
     geo: bool = False,
     dem_catchments: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the nested-dict catalog rooted at ``root_query``.
 
@@ -161,6 +162,15 @@ def build_catalog(
     See :func:`_build_geo` for the precedence. ``build_catalog`` stays IO-free:
     the caller loads the JSON, same as it already loads ``bassins``.
 
+    ``overrides`` (optional) is the already-loaded ``rivers`` mapping of a
+    ``config/valley_overrides.yaml`` file (see
+    :func:`valleespyr.config.load_valley_overrides`) — hand-curated,
+    per-river ``cours_d_eau_id`` keyed data: ``blacklist: true`` drops that
+    river (and everything upstream of it) from the tree entirely, folded into
+    its parent's ``n_folded`` same as a DEM-undetermined leaf; ``camera``
+    overrides the 3D view's auto-computed initial shot (see ``catalog_3d.js``
+    ``shotFor``) for rivers where the computed one looks wrong.
+
     Returns a dict with ``root`` (the tree), ``meta`` (counts, the root id)
     and — with ``geo=True`` — ``geo``.
     """
@@ -179,6 +189,8 @@ def build_catalog(
         mainline_id, trib_ids = _partition_children(rn, river.id)
 
         def keep(cid: str) -> bool:
+            if overrides is not None and overrides.get(cid, {}).get("blacklist"):
+                return False
             return not _never_gets_catchment(
                 rn, cid, bassins=bassins, dem_catchments=dem_catchments
             )
@@ -250,7 +262,9 @@ def build_catalog(
         },
     }
     if geo:
-        out["geo"] = _build_geo(rn, tree, bassins=bassins, dem_catchments=dem_catchments)
+        out["geo"] = _build_geo(
+            rn, tree, bassins=bassins, dem_catchments=dem_catchments, overrides=overrides
+        )
     return out
 
 
@@ -263,6 +277,7 @@ def _build_geo(
     *,
     bassins: gpd.GeoDataFrame | None = None,
     dem_catchments: dict[str, Any] | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``{"bbox": [w, s, e, n], "rivers": {id: {"line", "outlet", "catchment"}}}``.
 
@@ -322,6 +337,10 @@ def _build_geo(
             if entry is not None:
                 catchment = entry.get("catchment")
         rivers[rid] = {"line": parts, "outlet": outlet, "catchment": catchment}
+        if overrides is not None:
+            camera = overrides.get(rid, {}).get("camera")
+            if camera:
+                rivers[rid]["camera"] = camera
         for part in parts:
             for lon, lat in part:
                 note(lon, lat)

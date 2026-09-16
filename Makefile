@@ -28,6 +28,7 @@ DEM_CATCHMENTS ?= data/processed/catchments.json
 TERRAIN_DIR ?= docs/terrain
 
 STUDY_AREA ?= config/study_area.yaml
+VALLEY_OVERRIDES ?= config/valley_overrides.yaml
 
 CATALOG_DIR := data/processed
 
@@ -83,6 +84,7 @@ _build_root:
 	  $(if $(wildcard $(BASSINS)),--bassins "$(BASSINS)",) \
 	  $(if $(wildcard $(DEM_CATCHMENTS)),--dem-catchments "$(DEM_CATCHMENTS)",) \
 	  $(if $(wildcard $(TERRAIN_DIR)),--terrain-dir "$(TERRAIN_DIR)",) \
+	  $(if $(wildcard $(VALLEY_OVERRIDES)),--overrides "$(VALLEY_OVERRIDES)",) \
 	  --geo \
 	  -o "$(CATALOG_DIR)/$(SLUG).json" \
 	  --html "$(DIR)/index.html"
@@ -111,7 +113,7 @@ terrain: $(DEM_CATCHMENTS)
 # root's page rebuilds every time `site` runs, but was previously never
 # rechecked here, so a change touching only a non-front-page root looked
 # up to date forever.
-PREVIEW_DEPS := $(TRONCONS) $(STUDY_AREA) \
+PREVIEW_DEPS := $(TRONCONS) $(STUDY_AREA) $(wildcard $(VALLEY_OVERRIDES)) \
   $(wildcard src/valleespyr/render/*.py src/valleespyr/render/static/*.js \
              src/valleespyr/*.py src/valleespyr/hydro/*.py)
 PREVIEW_PAGES := $(shell uv run python3 -c \

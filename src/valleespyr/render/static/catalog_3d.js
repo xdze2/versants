@@ -426,6 +426,27 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
         if (n) { ox = sx / n; oz = sz / n; }
       }
       const size = sizeHint || WORLD_SCALE * 0.12;
+
+      // hand-tuned override (config/valley_overrides.yaml) takes precedence
+      // over the geometry-derived shot below - see that file's comment for
+      // why the computed default can look "wrong" (backoff/height are only
+      // a function of horizontal footprint size, blind to actual relief).
+      const cam = g.camera;
+      if (cam) {
+        const az = (cam.azimuth_deg || 0) * Math.PI / 180;
+        const el = (cam.elevation_deg != null ? cam.elevation_deg : 20) * Math.PI / 180;
+        const dist = cam.distance_m != null ? cam.distance_m : size * 0.6;
+        const targetY = cam.target_height_m != null ? cam.target_height_m : size * 0.03;
+        const r = dist * Math.cos(el);
+        const pos = new THREE.Vector3(
+          ox + r * Math.sin(az),
+          targetY + dist * Math.sin(el),
+          oz + r * Math.cos(az),
+        );
+        const target = new THREE.Vector3(ox, targetY, oz);
+        return { pos, target, originXZ: [ox, oz], outletXZ: [ex, ez] };
+      }
+
       const dx = ox - ex, dz = oz - ez;
       const len = Math.hypot(dx, dz) || 1;
       const dirX = dx / len, dirZ = dz / len;

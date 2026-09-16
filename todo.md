@@ -214,6 +214,57 @@ otherwise it's rework.
       confirmed the tree selection, URL hash, and infobox all updated to
       match, same as a tree-row click.)
 
+## 3c. Per-valley hand-curated overrides (new, found while smoke-testing the pipeline)
+
+Smoke-tested the pipeline end-to-end (`make site` + headless-Chrome
+screenshots) before committing to the full-Pyrenees run — see 3b's bugs for
+the same kind of check. Found the 3D view's auto-computed initial camera
+shot can look wrong (e.g. Ruisseau de Lastie: clipped into the hillside):
+`shotFor()` in `catalog_3d.js` derives camera height/backoff purely from the
+valley's *horizontal* footprint size, with no reference to actual relief
+(`z_min`/`z_max`), so a narrow/steep or wide/flat valley can get a
+mismatched shot. No per-valley data file existed to hand-fix cases like this
+without changing the general formula.
+
+- [x] Added `config/valley_overrides.yaml` — hand-curated, per-river
+      `cours_d_eau_id`-keyed data, loaded by
+      `valleespyr.config.load_valley_overrides`/`_if_present`. Two fields
+      for now: `blacklist: true` (drops the river, and everything upstream
+      of it, from the tree — folded into the parent's `n_folded`, same
+      mechanism as a DEM-undetermined leaf) and `camera` (spherical
+      override for the 3D view's initial shot: `azimuth_deg`,
+      `elevation_deg`, `distance_m`, `target_height_m`, all optional).
+      Designed to grow: room for future curated fields per the file's
+      header comment.
+      (`build_catalog` gained an `overrides` param, wired into the existing
+      `keep(cid)` child-filter closure for blacklist and into
+      `_build_geo`'s per-river dict (`geo.rivers[id]["camera"]`) for camera.
+      `catalog_3d.js`'s `shotFor()` checks `g.camera` first, converting the
+      spherical params into the same `{pos, target}` shape the computed
+      fallback produces, so the rest of the fly-to/orbit code is unchanged.
+      CLI: new `catalog --overrides <path>` option, defaulting to
+      `config/valley_overrides.yaml` when present (same pattern as
+      `--wfs-endpoint`'s `study_area.yaml` default). Makefile: `_build_root`
+      passes `--overrides` when `$(VALLEY_OVERRIDES)` exists (same
+      `$(wildcard ...)`-gated pattern as `--bassins`/`--dem-catchments`),
+      and it's in `PREVIEW_DEPS` so editing it triggers `make preview`'s
+      rebuild. Added one real entry (Lastie's camera) and confirmed with a
+      before/after headless-Chrome screenshot — the computed shot clipped
+      into the hillside, the hand-tuned one shows the whole stream network
+      from above. Tests: `tests/test_config.py` (parsing, empty file,
+      missing file, the real project file loads) and
+      `tests/test_catalog.py` (blacklist folds + drops from the tree
+      without disturbing unrelated rivers, camera passes through to
+      `geo.rivers` only for the overridden id). Full suite: 137 passed.
+      Screenshots saved to `docs/images/test_screenshots/` for reference.)
+- [ ] The underlying computed-default formula in `shotFor()` is still blind
+      to relief — this override file is a hand-tunable escape hatch, not a
+      fix to the general case. Worth revisiting once more baked valleys
+      exist (item 4) and it's clear how common a bad default actually is:
+      might be worth deriving `height`/`target.y` from the terrain
+      payload's `z_min`/`z_max`/`z_exaggeration` instead of horizontal size
+      alone, which would shrink how often a hand override is needed at all.
+
 ## 4. Full-Pyrenees / multi-root batch run
 
 Currently only one root (`ROOT ?= COURDEAU...` for Neste de Rioumajou) has

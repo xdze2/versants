@@ -397,6 +397,40 @@ def test_geo_line_pieces_share_endpoints(branchy_rn):
             assert tuple(sub[0]) in ends and tuple(sub[-1]) in ends
 
 
+# --------------------------------------------------------------------- overrides
+
+
+def test_blacklisted_river_is_dropped_and_folded(branchy_rn):
+    baseline = next(n for n in walk(build_catalog(branchy_rn, "CDE_STEM")["root"]) if n["id"] == "CDE_STEM")
+    cat = build_catalog(branchy_rn, "CDE_STEM", overrides={"CDE_B": {"blacklist": True}})
+    tree_ids = {node["id"] for node in walk(cat["root"])}
+    assert "CDE_B" not in tree_ids
+    stem_node = next(n for n in walk(cat["root"]) if n["id"] == "CDE_STEM")
+    assert stem_node["n_folded"] == baseline["n_folded"] + 1
+    assert stem_node["n_tributaries"] == baseline["n_tributaries"] - 1
+
+
+def test_blacklist_does_not_affect_unrelated_rivers(branchy_rn):
+    baseline_ids = {node["id"] for node in walk(build_catalog(branchy_rn, "CDE_STEM")["root"])}
+    cat = build_catalog(branchy_rn, "CDE_STEM", overrides={"CDE_B": {"blacklist": True}})
+    ids = {node["id"] for node in walk(cat["root"])}
+    assert ids == baseline_ids - {"CDE_B"}
+
+
+def test_camera_override_lands_in_geo_rivers(branchy_rn):
+    camera = {"azimuth_deg": 200, "elevation_deg": 25, "distance_m": 4000}
+    cat = build_catalog(
+        branchy_rn, "CDE_STEM", geo=True, overrides={"CDE_A": {"camera": camera}}
+    )
+    assert cat["geo"]["rivers"]["CDE_A"]["camera"] == camera
+    assert "camera" not in cat["geo"]["rivers"]["CDE_STEM"]
+
+
+def test_no_overrides_means_no_camera_key(branchy_rn):
+    cat = build_catalog(branchy_rn, "CDE_STEM", geo=True)
+    assert all("camera" not in g for g in cat["geo"]["rivers"].values())
+
+
 def _valley_sized_bassins() -> gpd.GeoDataFrame:
     """One sub-basin per ``cours_d_eau`` in ``branchy_rn``, sized in real km².
 

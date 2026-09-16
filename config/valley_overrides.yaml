@@ -1,0 +1,47 @@
+# Hand-curated per-valley data — things that can't be computed from the
+# WFS/DEM pipeline and don't belong in study_area.yaml (which only lists
+# catalog *roots*). Keyed by cours_d_eau_id, same ids used everywhere else
+# (see `valleespyr hydro rivers show <name> --from-file ...` to resolve one).
+# Loaded by valleespyr.config.load_valley_overrides, consumed by
+# build_catalog's `overrides` param. Safe to leave absent — every field here
+# is optional and every river not listed just gets the computed defaults.
+#
+# Fields per river, all optional:
+#
+#   blacklist: true
+#     Drops this river (and everything upstream of it) from the tree
+#     entirely, as if it didn't exist — folded into its parent's n_folded
+#     count. For pruning noise out of the catalog (data errors, unnamed
+#     ditches not worth a row) rather than hiding something you might want
+#     back without re-running the pipeline.
+#
+#   camera:
+#     Overrides the 3D view's auto-computed initial shot (catalog_3d.js
+#     `shotFor`). The computed default derives camera height/backoff purely
+#     from the valley's horizontal footprint size, with no reference to
+#     actual relief — for a narrow/steep valley or a wide/flat one that
+#     mismatch can point the camera into a hillside or off into empty space.
+#     All keys optional (each falls back to a computed default):
+#       azimuth_deg:      compass bearing the camera sits at, relative to
+#                         the target (0 = north, 90 = east). Default: 0.
+#       elevation_deg:    angle above the horizon looking down at the
+#                         target. Default: 20.
+#       distance_m:       camera-to-target distance, in metres. Default:
+#                         ~0.6x the valley's horizontal footprint size.
+#       target_height_m:  height of the look-target above the valley
+#                         floor, in metres. Default: a small fraction of
+#                         footprint size.
+#     Tune by hand: open the river in the browser, use "drag to orbit /
+#     scroll to zoom" to find a shot you like, then estimate azimuth from
+#     the compass widget and distance/elevation from feel — there's no
+#     read-back of the live camera yet.
+
+rivers:
+  COURDEAU0000002000905987:  # Ruisseau de Lastie — computed shot clips into
+                              # the hillside; hand-tuned to look upstream
+                              # from a bit further back and higher up.
+    camera:
+      azimuth_deg: 200
+      elevation_deg: 25
+      distance_m: 4000
+      target_height_m: 250

@@ -9,7 +9,11 @@ from typing import Any
 import click
 
 from . import watershed as ws
-from .config import DEFAULT_CONFIG_PATH, load_study_area_if_present
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_VALLEY_OVERRIDES_PATH,
+    load_study_area_if_present,
+)
 from .dump import dump_layer
 from .sources.wfs import GEOPLATEFORME_WFS, LAYER_BASSIN_VERSANT, WFSClient, WFSError
 
@@ -1188,6 +1192,16 @@ def valley_catchments_terrain_precompute(
     "fills the map mask (--geo) for rivers --bassins doesn't cover.",
 )
 @click.option(
+    "--overrides",
+    "overrides_path",
+    type=click.Path(dir_okay=False, exists=True),
+    default=str(DEFAULT_VALLEY_OVERRIDES_PATH)
+    if DEFAULT_VALLEY_OVERRIDES_PATH.is_file()
+    else None,
+    help="Hand-curated per-river data — blacklist and 3D camera overrides. "
+    "Defaults to config/valley_overrides.yaml when present in the cwd.",
+)
+@click.option(
     "--max-depth",
     type=int,
     default=None,
@@ -1228,6 +1242,7 @@ def catalog_cmd(
     bbox_s: str | None,
     bassins_path: str | None,
     dem_catchments_path: str | None,
+    overrides_path: str | None,
     max_depth: int | None,
     geo: bool,
     terrain_dir: str | None,
@@ -1268,12 +1283,19 @@ def catalog_cmd(
 
         dem_catchments = json.loads(Path(dem_catchments_path).read_text("utf-8")).get("rivers", {})
 
+    overrides = None
+    if overrides_path:
+        from .config import load_valley_overrides
+
+        overrides = load_valley_overrides(overrides_path)
+
     try:
         catalog = build_catalog(
             rn,
             root_query,
             bassins=bassins,
             dem_catchments=dem_catchments,
+            overrides=overrides,
             max_depth=max_depth,
             geo=geo,
         )
