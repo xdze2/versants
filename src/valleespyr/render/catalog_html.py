@@ -194,14 +194,18 @@ def catalog_to_html(
     *,
     max_depth: int | None = None,
     terrain_url: str | None = None,
+    data_url: str = "catalog_index.json",
 ) -> str:
-    """Return the self-contained two-level river selector HTML document.
+    """Return the two-level river selector HTML document (a thin shell).
 
-    The document ships the catalog JSON plus a script that renders the local
+    The document ships a script that ``fetch()``es the catalog JSON from
+    ``data_url`` (relative to the HTML file) and renders the local
     neighbourhood of the selected river (downstream link, siblings, itself,
-    its sub-rivers) and re-renders on every click. ``max_depth`` is accepted
-    for API compatibility but no longer changes the initial render — the
-    view only ever shows two levels regardless of tree depth.
+    its sub-rivers), re-rendering on every click. It does not embed the
+    catalog data itself — see :func:`render_catalog_html`, which writes the
+    JSON file alongside the HTML. ``max_depth`` is accepted for API
+    compatibility but no longer changes the initial render — the view only
+    ever shows two levels regardless of tree depth.
 
     ``terrain_url`` (a directory path or URL, relative to the HTML file — see
     ``valleespyr catalog --terrain-dir``) switches the map column from the
@@ -270,8 +274,10 @@ def catalog_to_html(
         "ROW_H": ROW_H, "LANE_W": LANE_W, "LANE_PAD": LANE_PAD,
         "DOT_R": DOT_R, "LABEL_GAP": LABEL_GAP, "BG": _BG,
     }
-    js = _JS.replace("__GEOM__", json.dumps(geom)).replace(
-        "__ORDER_STYLE__", json.dumps(_ORDER_STYLE)
+    js = (
+        _JS.replace("__GEOM__", json.dumps(geom))
+        .replace("__ORDER_STYLE__", json.dumps(_ORDER_STYLE))
+        .replace("__DATA_URL__", json.dumps(data_url))
     )
     # The geo script must run first: it defines window._catalogInitGeo, which
     # the base script's IIFE calls (synchronously, at its own end) once it exists.
@@ -279,8 +285,6 @@ def catalog_to_html(
         js = _JS_GEO_3D.replace("__TERRAIN_URL__", json.dumps(terrain_url)) + js
     elif has_geo:
         js = _JS_GEO + js
-
-    payload = json.dumps(catalog, ensure_ascii=False).replace("<", "\\u003c")
 
     if use_3d:
         leaflet_head = (
@@ -324,7 +328,6 @@ def catalog_to_html(
     {map_col}
   </div>
 </main>
-<script id="catalog-data" type="application/json">{payload}</script>
 <script>{js}</script>
 </body>
 </html>
@@ -337,12 +340,27 @@ def render_catalog_html(
     *,
     max_depth: int | None = None,
     terrain_url: str | None = None,
+    data_filename: str = "catalog_index.json",
 ) -> Path:
-    """Write the catalog as a self-contained two-level river selector HTML file; return the path."""
+    """Write the catalog as a thin HTML shell plus its own JSON data file.
+
+    Writes ``<path's directory>/<data_filename>`` (the full catalog tree/map
+    payload, as plain JSON — inspectable/diffable on its own) and ``path``
+    itself (markup/CSS/JS only, no baked-in data), which ``fetch()``es that
+    JSON file on load. Returns ``path``.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    (path.parent / data_filename).write_text(
+        json.dumps(catalog, ensure_ascii=False), encoding="utf-8"
+    )
     path.write_text(
-        catalog_to_html(catalog, max_depth=max_depth, terrain_url=terrain_url),
+        catalog_to_html(
+            catalog,
+            max_depth=max_depth,
+            terrain_url=terrain_url,
+            data_url=data_filename,
+        ),
         encoding="utf-8",
     )
     return path

@@ -27,7 +27,7 @@ from shapely.geometry import LineString  # noqa: E402
 from valleespyr.catalog import build_catalog  # noqa: E402
 from valleespyr.hydro.network import build_graph  # noqa: E402
 from valleespyr.hydro.rivers import build_river_network  # noqa: E402
-from valleespyr.render.catalog_html import catalog_to_html  # noqa: E402
+from valleespyr.render.catalog_html import catalog_to_html, render_catalog_html  # noqa: E402
 
 SAMPLE = Path("data/raw/troncon_hydrographique_gavarnie_sample.geojson")
 
@@ -280,30 +280,27 @@ def test_max_depth_zero_truncates_root_tributaries(branchy_rn):
 # ------------------------------------------------------------------------- html
 
 
-def test_catalog_to_html_is_self_contained(branchy_rn):
+def test_catalog_to_html_is_a_thin_shell(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM")
     doc = catalog_to_html(cat)
     assert doc.lstrip().startswith("<!doctype html>")
     assert "http://" not in doc.replace('lang="en"', "")  # no external refs
     assert "https://" not in doc
     assert "<script" in doc and "</script>" in doc
-    assert "TribA" in doc
-    # the data payload is embedded for a downstream reader
-    assert '<script id="catalog-data"' in doc
+    # no data baked into the page — it's fetched at runtime instead
+    assert "TribA" not in doc
+    assert '<script id="catalog-data"' not in doc
+    assert "catalog_index.json" in doc
 
 
 def test_catalog_to_html_is_a_two_level_selector(branchy_rn):
     cat = build_catalog(branchy_rn, "CDE_STEM")
     doc = catalog_to_html(cat)
     # the local view is laid out in the browser: an empty <ol> the script
-    # fills, the catalog JSON, and the client renderer
+    # fills once the fetched catalog JSON arrives
     assert '<ol id="labels" class="labels">' in doc
-    assert '<script id="catalog-data"' in doc
     assert "function render(" in doc
-    # every river's name is reachable from the embedded payload
-    for node in walk(cat["root"]):
-        if node.get("name"):
-            assert node["name"] in doc
+    assert "fetch(" in doc
 
 
 def test_catalog_to_html_has_breadcrumb_and_selection(branchy_rn):
@@ -322,11 +319,30 @@ def test_catalog_to_html_escapes_names(simple_rn):
     doc = catalog_to_html(cat)
     # the title/header run through html.escape
     assert "A &amp; B &lt;em&gt;x&lt;/em&gt;" in doc
-    # a river name only reaches the page via the embedded JSON payload, whose
-    # every "<" is neutralised so it cannot open a tag inside the <script>
-    assert "<script>x</script>" not in doc
-    assert "</script>x" not in doc
-    assert "Tricky \\u003cscript>x\\u003c/script>" in doc
+    # river names never reach the shell HTML at all — they live only in the
+    # separately-written JSON data file
+    assert "Tricky" not in doc
+
+
+def test_render_catalog_html_writes_a_separate_json_data_file(tmp_path, branchy_rn):
+    cat = build_catalog(branchy_rn, "CDE_STEM")
+    out = tmp_path / "index.html"
+    render_catalog_html(cat, out)
+
+    data_file = tmp_path / "catalog_index.json"
+    assert data_file.exists()
+
+    import json
+
+    loaded = json.loads(data_file.read_text("utf-8"))
+    assert loaded["root"]["id"] == cat["root"]["id"]
+    for node in walk(cat["root"]):
+        if node.get("name"):
+            assert node["name"] in data_file.read_text("utf-8")
+
+    doc = out.read_text("utf-8")
+    assert "catalog_index.json" in doc
+    assert '<script id="catalog-data"' not in doc
 
 
 # ---------------------------------------------------------------------- geo block
@@ -589,4 +605,5 @@ def test_gavarnie_catalog_end_to_end():
     assert by_name["Gave de Héas"]["pfafstetter"]
 
     doc = catalog_to_html(cat)
-    assert "Gave de Héas" in doc
+    assert doc.lstrip().startswith("<!doctype html>")
+    assert "function render(" in doc

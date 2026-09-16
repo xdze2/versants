@@ -31,8 +31,9 @@ TERRAIN_DIR ?= docs/terrain
 # publishes; there is no separate 2D-only build anymore.
 ROOT ?= COURDEAU0000002000907013
 
-PAGE     := docs/index.html
-CATALOG  := data/processed/rioumajou_catalog.json
+PAGE      := docs/index.html
+CATALOG   := data/processed/rioumajou_catalog.json
+PAGE_DATA := docs/catalog_index.json
 
 .PHONY: site terrain preview clean
 
@@ -44,6 +45,9 @@ site: $(PAGE)
 # and --terrain-dir guards below) and both are produced by separate, slow
 # batches (valley catchments precompute / terrain-precompute), not something
 # a plain `make site` should trigger.
+# `--html` also writes $(PAGE_DATA) alongside $(PAGE) (the JSON the shell
+# fetches on load) — not listed as an explicit target since both come from
+# the same `valleespyr catalog` invocation.
 $(PAGE): $(TRONCONS) $(BASSINS) \
          src/valleespyr/catalog.py src/valleespyr/render/catalog_html.py \
          src/valleespyr/render/static/catalog_3d.js
@@ -58,7 +62,7 @@ $(PAGE): $(TRONCONS) $(BASSINS) \
 	  --geo \
 	  -o "$(CATALOG)" \
 	  --html "$(PAGE)"
-	@echo "built $(PAGE)"
+	@echo "built $(PAGE) and $(PAGE_DATA)"
 
 # Bakes one <river_id>.json (heightmap + streams + contours + IGN basemap)
 # per DEM-sourced river in DEM_CATCHMENTS. Slow and network-heavy (WMTS
@@ -73,7 +77,8 @@ terrain: $(DEM_CATCHMENTS)
 
 preview: $(PAGE)
 	@echo "serving docs/ at http://localhost:8000  (Ctrl-C to stop)"
+	@echo "note: index.html fetches $(PAGE_DATA) — open it via this server, not file://"
 	cd docs && python3 -m http.server 8000
 
 clean:
-	rm -f $(PAGE) $(CATALOG)
+	rm -f $(PAGE) $(PAGE_DATA) $(CATALOG)
