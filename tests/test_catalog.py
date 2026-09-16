@@ -574,9 +574,9 @@ def test_geo_html_gets_a_map(branchy_rn):
     assert 'id="map"' in doc and 'class="mapcol"' in doc
     assert "has-geo" in doc  # JS opts the body into click-to-map
     # the map draws real IGN/OSM basemap tiles, so (unlike the rest of the
-    # page) this is the one part that needs network access — Leaflet plus
-    # the tile layers are pulled from public hosts
-    assert "leaflet" in doc.lower()
+    # page) this is the one part that needs network access — MapLibre GL
+    # plus the tile/style layers are pulled from public hosts
+    assert "maplibre" in doc.lower()
     assert "data.geopf.fr" in doc
     # no map column without a geo block, and a plain catalog stays offline
     plain_cat = build_catalog(branchy_rn, "CDE_STEM")
@@ -586,24 +586,28 @@ def test_geo_html_gets_a_map(branchy_rn):
 
 
 def test_map_line_width_scales_with_strahler_order(branchy_rn):
-    """The mini-map ships a mapWidth(order) helper and feeds each drawn line its
-    river's Strahler order, so a trunk renders heavier than a headwater."""
+    """The mini-map's river layer feeds each line's Strahler order into a
+    MapLibre data-driven 'line-width' expression (mapWidthExpr), so a trunk
+    renders heavier than a headwater; selected/preview/upstream lines get an
+    extra multiplier over the same per-order base width."""
     doc = catalog_to_html(build_catalog(branchy_rn, "CDE_STEM", geo=True))
-    assert "function mapWidth(order" in doc
-    # context, upstream and selected lines all get a per-order stroke-width
-    assert "mapWidth((node[id] || {}).strahler)" in doc
-    assert "mapWidth((node[uid] || {}).strahler, 1.25)" in doc
-    assert "mapWidth((node[id] || {}).strahler, 1.7)" in doc
+    assert "function mapWidthExpr()" in doc
+    assert "['get', 'strahler']" in doc
+    # context, upstream, preview and selected states all scale off the same base
+    assert "['*', base, 1.7]" in doc  # selected
+    assert "['*', base, 1.5]" in doc  # preview
+    assert "['*', base, 1.25]" in doc  # upstream
 
 
 def test_map_ships_the_valley_mask_function(branchy_rn):
-    """The client ships paintMask(id): draws a world-covering polygon with the
-    river's own catchment ring cut out as a hole (even-odd fill), so a
-    valley-sized selection dims everything outside it."""
+    """The client ships setMask(id): draws a world-covering polygon with the
+    river's own catchment ring cut out as a hole (even-odd fill via a fill
+    layer over the punched-out GeoJSON), so a valley-sized selection dims
+    everything outside it."""
     doc = catalog_to_html(build_catalog(branchy_rn, "CDE_STEM", geo=True))
-    assert "function paintMask(id)" in doc
-    assert "fillRule: 'evenodd'" in doc
-    assert "paintMask(id);" in doc  # called from paintMap on every selection
+    assert "function setMask(id)" in doc
+    assert "WORLD_RING, ...holes" in doc
+    assert "setMask(id);" in doc  # called from paintMap on every selection
 
 
 # ------------------------------------------------------------------- forest catalog

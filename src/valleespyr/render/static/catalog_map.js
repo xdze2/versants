@@ -2,17 +2,8 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
   (function initGeo() {
     const geo = data.geo;
     const mapEl = document.getElementById('map');
-    if (!geo || !geo.rivers || !geo.bbox || !mapEl || !window.L) return;
+    if (!geo || !geo.rivers || !geo.bbox || !mapEl || !window.maplibregl) return;
     document.body.classList.add('has-geo');
-
-    // line weight scales with Strahler order, same idea as the git-graph
-    // lanes but a wider spread so a trunk reads clearly against its
-    // headwaters. `boost` fattens the picked-out selection over the faint ctx.
-    function mapWidth(order, boost) {
-      const o = Math.min(Math.max(order || 1, 1), 7);
-      const w = (1.1 + (o - 1) * 0.7) * (boost || 1);
-      return boost && boost > 1 ? Math.max(w, 2.2) : w;
-    }
 
     const node = {}, up = {};
     (function w(n) {
@@ -27,65 +18,247 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
     })(root);
 
     const [BW, BS, BE, BN] = geo.bbox;
-    const bounds = L.latLngBounds([BS, BW], [BN, BE]);
+    const bounds = [[BW, BS], [BE, BN]];  // MapLibre: [[west,south],[east,north]]
 
-    const map = L.map(mapEl, {
-      zoomControl: true, attributionControl: true, minZoom: 6, maxZoom: 17,
-    });
-    map.fitBounds(bounds, { padding: [14, 14] });
-
-    // --- basemaps: IGN topo (key-free Plan IGN) and OSM, radio-selected ---
-    const ignPlan = L.tileLayer(
-      'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
-      '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png' +
-      '&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
-      { maxNativeZoom: 16, maxZoom: 17, attribution: 'Plan IGN — IGN/Geoportail' });
-    // MapTiler's OSM-based raster tiles — tile.openstreetmap.org actively
-    // blocks third-party sites, so we don't hotlink it directly. Needs a
+    // --- basemaps: a custom outdoor style (vector, needs MapLibre — raster
+    // export of a custom MapTiler style is paid-tier only) with the
+    // previous IGN/OSM raster choices kept as alternates. MapTiler needs a
     // free, origin-restricted API key (see catalog_html.py's
-    // _maptiler_api_key/__MAPTILER_KEY__); the "OpenStreetMap" radio is
-    // omitted from the page entirely when no key is configured, so `osm`
-    // stays unused rather than pointing at a broken URL.
+    // _maptiler_api_key/__MAPTILER_KEY__); options that need it are omitted
+    // from the page entirely when no key is configured.
     const MAPTILER_KEY = __MAPTILER_KEY__;
-    const osm = MAPTILER_KEY && L.tileLayer(
-      `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`, {
-        maxNativeZoom: 20, maxZoom: 20,
+    const CUSTOM_STYLE_ID = __MAPTILER_STYLE_ID__;
+
+    const IGN_PLAN_SOURCE = {
+      type: 'raster', tileSize: 256, maxzoom: 16,
+      tiles: ['https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
+        '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png' +
+        '&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}'],
+      attribution: 'Plan IGN — IGN/Geoportail',
+    };
+    const IGN_STYLE = {
+      version: 8, sources: { ignPlan: IGN_PLAN_SOURCE },
+      layers: [{ id: 'ignPlan', type: 'raster', source: 'ignPlan' }],
+    };
+    const OSM_STYLE = MAPTILER_KEY ? {
+      version: 8,
+      sources: { osm: {
+        type: 'raster', tileSize: 256, maxzoom: 20,
+        tiles: [`https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`],
         attribution: '&copy; OpenStreetMap contributors &copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a>',
+      } },
+      layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+    } : null;
+    // Custom MapTiler Cloud style (vector) — the actual target look; only
+    // offered when both a key and a style id are configured.
+    const CUSTOM_STYLE_URL = (MAPTILER_KEY && CUSTOM_STYLE_ID)
+      ? `https://api.maptiler.com/maps/${CUSTOM_STYLE_ID}/style.json?key=${MAPTILER_KEY}`
+      : null;
+
+    const BASEMAPS = {
+      ign: IGN_STYLE,
+      osm: OSM_STYLE,
+      custom: CUSTOM_STYLE_URL,
+    };
+    const initialBase = CUSTOM_STYLE_URL ? 'custom' : 'ign';
+
+    const map = new maplibregl.Map({
+      container: mapEl,
+      style: BASEMAPS[initialBase],
+      bounds, fitBoundsOptions: { padding: 14 },
+      minZoom: 6, maxZoom: 17,
+      attributionControl: { compact: true },
+    });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+
+    // key-free hillshade ("estompage"), its own tile matrix set (PM_0_15) —
+    // added/removed as an overlay on top of whichever base style is active.
+    const HILLSHADE_SOURCE_ID = 'hillshade-src';
+    const HILLSHADE_LAYER_ID = 'hillshade-layer';
+    function addHillshade() {
+      if (map.getSource(HILLSHADE_SOURCE_ID)) return;
+      map.addSource(HILLSHADE_SOURCE_ID, {
+        type: 'raster', tileSize: 256, maxzoom: 15,
+        tiles: ['https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
+          '&LAYER=ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW&STYLE=estompage_grayscale' +
+          '&FORMAT=image/png&TILEMATRIXSET=PM_0_15&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}'],
+        attribution: 'Estompage — IGN/Geoportail',
       });
-    // key-free hillshade ("estompage"), its own tile matrix set (PM_0_15).
-    const hillshade = L.tileLayer(
-      'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
-      '&LAYER=ELEVATION.ELEVATIONGRIDCOVERAGE.SHADOW&STYLE=estompage_grayscale' +
-      '&FORMAT=image/png&TILEMATRIXSET=PM_0_15&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
-      { maxNativeZoom: 15, maxZoom: 17, opacity: 0.45, attribution: 'Estompage — IGN/Geoportail' });
-
-    ignPlan.addTo(map);
-
-    // river network panes, drawn above the basemap; the valley mask sits
-    // between the basemap and the river lines, so a masked selection still
-    // shows its highlighted network crisply on top of the dimmed backdrop.
-    const maskPane = map.createPane('valleyMask');
-    maskPane.style.zIndex = 350;  // above tiles (200), below overlayPane (400)
-    let maskLayer = null;
-    const ctxPane = L.featureGroup().addTo(map);
-    const hiPane = L.featureGroup().addTo(map);
-    const previewPane = L.featureGroup().addTo(map);
-
-    function toLatLngs(subs) {
-      return subs.map(sub => sub.map(([lon, lat]) => [lat, lon]));
+      map.addLayer({ id: HILLSHADE_LAYER_ID, type: 'raster', source: HILLSHADE_SOURCE_ID, paint: { 'raster-opacity': 0.45 } });
+    }
+    function removeHillshade() {
+      if (map.getLayer(HILLSHADE_LAYER_ID)) map.removeLayer(HILLSHADE_LAYER_ID);
+      if (map.getSource(HILLSHADE_SOURCE_ID)) map.removeSource(HILLSHADE_SOURCE_ID);
     }
 
-    const ctxLines = {};  // id -> Leaflet polyline, for hover restyle + hover-out map->tree
-    for (const id in geo.rivers) {
-      const line = L.polyline(toLatLngs(geo.rivers[id].line), {
-        color: '#7c8894', weight: mapWidth((node[id] || {}).strahler),
-        opacity: 0.55, lineCap: 'round', lineJoin: 'round',
-      }).addTo(ctxPane);
-      ctxLines[id] = line;
-      line.on('mouseover', () => { if (window._catalogRowPreview) window._catalogRowPreview(id); });
-      line.on('mouseout', () => { if (window._catalogRowPreview) window._catalogRowPreview(null); });
-      line.on('click', () => focusOn(id));
+    function toLngLats(subs) {
+      return subs.map(sub => sub.map(([lon, lat]) => [lon, lat]));
     }
+
+    // --- river geometry as one GeoJSON source; per-river state (context /
+    // upstream / selected / preview) drives paint via feature-state, since
+    // MapLibre styles many features from one source rather than one object
+    // per line the way Leaflet did.
+    const riverIds = Object.keys(geo.rivers);
+    const riverFeatures = riverIds.map(id => ({
+      type: 'Feature',
+      id,
+      properties: { id, strahler: (node[id] || {}).strahler || 1 },
+      geometry: { type: 'MultiLineString', coordinates: toLngLats(geo.rivers[id].line) },
+    }));
+    const riversGeoJSON = { type: 'FeatureCollection', features: riverFeatures };
+
+    const RIVERS_SOURCE_ID = 'rivers-src';
+    const RIVERS_LINE_ID = 'rivers-line';
+    const RIVERS_HIT_ID = 'rivers-hit';  // wide invisible line, easier hover/click target
+    const OUTLET_SOURCE_ID = 'outlet-src';
+    const OUTLET_LAYER_ID = 'outlet-layer';
+    const MASK_SOURCE_ID = 'mask-src';
+    const MASK_LAYER_ID = 'mask-layer';
+
+    const CTX_COLOR = '#7c8894', UP_COLOR = '#5b6b7a', SEL_COLOR = '#2f6f4f', PREVIEW_COLOR = '#a5682f';
+
+    function addRiverLayers() {
+      if (!map.getSource(RIVERS_SOURCE_ID)) {
+        map.addSource(RIVERS_SOURCE_ID, { type: 'geojson', data: riversGeoJSON, promoteId: 'id' });
+      }
+      if (!map.getLayer(RIVERS_LINE_ID)) {
+        map.addLayer({
+          id: RIVERS_LINE_ID, type: 'line', source: RIVERS_SOURCE_ID,
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: {
+            'line-color': [
+              'case',
+              ['boolean', ['feature-state', 'selected'], false], SEL_COLOR,
+              ['boolean', ['feature-state', 'preview'], false], PREVIEW_COLOR,
+              ['boolean', ['feature-state', 'upstream'], false], UP_COLOR,
+              CTX_COLOR,
+            ],
+            'line-opacity': [
+              'case',
+              ['boolean', ['feature-state', 'selected'], false], 1,
+              ['boolean', ['feature-state', 'preview'], false], 0.95,
+              ['boolean', ['feature-state', 'upstream'], false], 0.85,
+              0.55,
+            ],
+            'line-width': [
+              'case',
+              ['boolean', ['feature-state', 'selected'], false], ['*', mapWidthExpr(), 1.7],
+              ['boolean', ['feature-state', 'preview'], false], ['*', mapWidthExpr(), 1.5],
+              ['boolean', ['feature-state', 'upstream'], false], ['*', mapWidthExpr(), 1.25],
+              mapWidthExpr(),
+            ],
+          },
+        });
+      }
+      if (!map.getLayer(RIVERS_HIT_ID)) {
+        map.addLayer({
+          id: RIVERS_HIT_ID, type: 'line', source: RIVERS_SOURCE_ID,
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#000', 'line-opacity': 0, 'line-width': 14 },
+        });
+      }
+    }
+    // Line weight scales with Strahler order, same idea as the git-graph
+    // lanes but a wider spread so a trunk reads clearly against its
+    // headwaters — as a MapLibre expression over the 'strahler' property
+    // (rather than a plain JS function) so it can live inside a
+    // data-driven 'line-width' paint spec.
+    function mapWidthExpr() {
+      return [
+        'let', 'o', ['min', ['max', ['coalesce', ['get', 'strahler'], 1], 1], 7],
+        ['+', 1.1, ['*', ['-', ['var', 'o'], 1], 0.7]],
+      ];
+    }
+    // boost>1's Math.max(w, 2.2) floor doesn't translate cleanly into the
+    // multiplicative expression above; applied as a floor on selected/
+    // preview/upstream widths after the fact via a wrapping 'max'.
+    function applyWidthFloor() {
+      const base = mapWidthExpr();
+      map.setPaintProperty(RIVERS_LINE_ID, 'line-width', [
+        'case',
+        ['boolean', ['feature-state', 'selected'], false], ['max', ['*', base, 1.7], 2.2],
+        ['boolean', ['feature-state', 'preview'], false], ['max', ['*', base, 1.5], 2.2],
+        ['boolean', ['feature-state', 'upstream'], false], ['max', ['*', base, 1.25], 2.2],
+        base,
+      ]);
+    }
+
+    function addOutletLayer() {
+      if (!map.getSource(OUTLET_SOURCE_ID)) {
+        map.addSource(OUTLET_SOURCE_ID, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      }
+      if (!map.getLayer(OUTLET_LAYER_ID)) {
+        map.addLayer({
+          id: OUTLET_LAYER_ID, type: 'circle', source: OUTLET_SOURCE_ID,
+          paint: {
+            'circle-radius': 4.5, 'circle-color': SEL_COLOR,
+            'circle-stroke-color': '#fff', 'circle-stroke-width': 1,
+          },
+        });
+      }
+    }
+
+    // valley mask: world rectangle with the catchment ring(s) as holes
+    // (even-odd fill), sitting between the basemap and the river lines.
+    const WORLD_RING = [[-180, -89], [180, -89], [180, 89], [-180, 89], [-180, -89]];
+    function addMaskLayer() {
+      if (!map.getSource(MASK_SOURCE_ID)) {
+        map.addSource(MASK_SOURCE_ID, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      }
+      if (!map.getLayer(MASK_LAYER_ID)) {
+        map.addLayer({
+          id: MASK_LAYER_ID, type: 'fill', source: MASK_SOURCE_ID,
+          paint: { 'fill-color': '#ffffff', 'fill-opacity': 0.75 },
+        }, RIVERS_LINE_ID);  // insert below river lines, above the basemap
+        map.addLayer({
+          id: MASK_LAYER_ID + '-outline', type: 'line', source: MASK_SOURCE_ID,
+          paint: { 'line-color': '#2f6f4f', 'line-width': 1.5, 'line-opacity': 0.6 },
+        }, RIVERS_LINE_ID);
+      }
+    }
+
+    function setMask(id) {
+      const catchment = (geo.rivers[id] || {}).catchment;
+      const src = map.getSource(MASK_SOURCE_ID);
+      if (!src) return;
+      if (!catchment || !catchment.length) {
+        src.setData({ type: 'FeatureCollection', features: [] });
+        return;
+      }
+      const holes = catchment.map(ring => ring.map(([lon, lat]) => [lon, lat]));
+      src.setData({
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature', properties: {},
+          geometry: { type: 'Polygon', coordinates: [WORLD_RING, ...holes] },
+        }],
+      });
+    }
+
+    function addAllLayers() {
+      addRiverLayers();
+      applyWidthFloor();
+      addOutletLayer();
+      addMaskLayer();
+    }
+
+    // river layers/sources live on the vector-tile style object and are
+    // wiped on every style swap (basemap radio, or loading the custom
+    // style initially) — re-add them on every 'styledata' event (MapLibre's
+    // 'style.load' only ever fires once, for the very first style, despite
+    // the name suggesting otherwise — a subsequent setStyle() call fires
+    // 'styledata' instead, and isStyleLoaded() is unreliable at that point,
+    // so this doesn't gate on it). 'styledata' can fire more than once for
+    // the same swap; every add*Layer() here is itself idempotent (guarded
+    // on getSource()/getLayer()), so re-running this a few extra times is
+    // harmless, and simpler than trying to de-duplicate the event.
+    function onStyleReady() {
+      addAllLayers();
+      if (currentId) paintMap(currentId, { flyTo: false });
+      if (shadeBox && shadeBox.checked) addHillshade();
+    }
+    map.on('styledata', onStyleReady);
 
     const cap = document.getElementById('infobox');
     let current = null, currentId = null;
@@ -97,56 +270,53 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
       for (const id of ids) {
         const g = geo.rivers[id];
         if (!g) continue;
-        for (const sub of g.line) for (const [lon, lat] of sub) pts.push([lat, lon]);
+        for (const sub of g.line) for (const [lon, lat] of sub) pts.push([lon, lat]);
       }
-      return pts.length ? L.latLngBounds(pts) : null;
+      if (!pts.length) return null;
+      let w = pts[0][0], s = pts[0][1], e = pts[0][0], n = pts[0][1];
+      for (const [lon, lat] of pts) {
+        w = Math.min(w, lon); e = Math.max(e, lon);
+        s = Math.min(s, lat); n = Math.max(n, lat);
+      }
+      return [[w, s], [e, n]];
     }
 
-    // A river whose own catchment reads as "one valley" (see _VALLEY_AREA_*
-    // in catalog.py) ships a `catchment` ring: draw everything outside it
-    // dimmed, so that valley reads as its own bounded world rather than a
-    // flat, undifferentiated stretch of the bird's-eye basemap. A river
-    // outside that size range has no ring — falls back to the plain
-    // full-catchment-context view, no mask.
-    const WORLD_RING = [[-89, -180], [-89, 180], [89, 180], [89, -180]];
-    function paintMask(id) {
-      if (maskLayer) { map.removeLayer(maskLayer); maskLayer = null; }
-      const catchment = (geo.rivers[id] || {}).catchment;
-      if (!catchment || !catchment.length) return;
-      const holes = catchment.map(ring => ring.map(([lon, lat]) => [lat, lon]));
-      maskLayer = L.polygon([WORLD_RING, ...holes], {
-        pane: 'valleyMask', stroke: true, color: '#2f6f4f', weight: 1.5,
-        opacity: 0.6, fill: true, fillColor: '#ffffff', fillOpacity: 0.75,
-        fillRule: 'evenodd', interactive: false,
-      }).addTo(map);
+    let statefulIds = [];  // ids currently carrying a non-default feature-state, to clear cheaply
+    function clearRiverState() {
+      for (const id of statefulIds) {
+        map.setFeatureState({ source: RIVERS_SOURCE_ID, id }, { selected: false, upstream: false });
+      }
+      statefulIds = [];
     }
 
     // paint the map for a selection; the graph refold is driven separately
     // by the outer focusOn(), which calls this.
-    function paintMap(id) {
+    function paintMap(id, opts) {
       const g = geo.rivers[id];
-      if (!g) return;
+      if (!g || !map.getSource(RIVERS_SOURCE_ID)) return;
       currentId = id;
-      hiPane.clearLayers();
-      paintMask(id);
+      clearRiverState();
+      setMask(id);
       for (const uid of up[id] || []) {
-        const ug = geo.rivers[uid];
-        if (!ug) continue;
-        L.polyline(toLatLngs(ug.line), {
-          color: '#5b6b7a', weight: mapWidth((node[uid] || {}).strahler, 1.25),
-          opacity: 0.85, lineCap: 'round', lineJoin: 'round',
-        }).addTo(hiPane);
+        if (!geo.rivers[uid]) continue;
+        map.setFeatureState({ source: RIVERS_SOURCE_ID, id: uid }, { upstream: true });
+        statefulIds.push(uid);
       }
-      L.polyline(toLatLngs(g.line), {
-        color: '#2f6f4f', weight: mapWidth((node[id] || {}).strahler, 1.7),
-        opacity: 1, lineCap: 'round', lineJoin: 'round',
-      }).addTo(hiPane);
-      L.circleMarker([g.outlet[1], g.outlet[0]], {
-        radius: 4.5, color: '#fff', weight: 1, fillColor: '#2f6f4f', fillOpacity: 1,
-      }).addTo(hiPane);
+      map.setFeatureState({ source: RIVERS_SOURCE_ID, id }, { selected: true });
+      statefulIds.push(id);
 
-      const box = boundsOf([id].concat(up[id] || []));
-      if (box) map.flyToBounds(box, { padding: [34, 34], duration: 0.4, maxZoom: 15 });
+      const outletSrc = map.getSource(OUTLET_SOURCE_ID);
+      if (outletSrc) {
+        outletSrc.setData({
+          type: 'FeatureCollection',
+          features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [g.outlet[0], g.outlet[1]] } }],
+        });
+      }
+
+      if (!opts || opts.flyTo !== false) {
+        const box = boundsOf([id].concat(up[id] || []));
+        if (box) map.fitBounds(box, { padding: 34, duration: 400, maxZoom: 15 });
+      }
 
       const n = node[id] || {};
       const nUp = (up[id] || []).length;
@@ -170,8 +340,8 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
         '<div class="stats">' + statsHtml + '</div>' + alsoHtml;
       document.getElementById('mapreset').addEventListener('click', ev => {
         ev.preventDefault();
-        if (maskLayer) { map.removeLayer(maskLayer); maskLayer = null; }
-        map.flyToBounds(bounds, { padding: [14, 14], duration: 0.4 });
+        setMask(null);
+        map.fitBounds(bounds, { padding: 14, duration: 400 });
       });
       syncSelectedRow();
     }
@@ -189,32 +359,51 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
     let previewId = null;
     function paintPreview(id) {
       if (previewId === id) return;
+      if (previewId && previewId !== currentId) {
+        map.setFeatureState({ source: RIVERS_SOURCE_ID, id: previewId }, { preview: false });
+      }
       previewId = id;
-      previewPane.clearLayers();
-      if (!id || id === currentId) return;
-      const g = geo.rivers[id];
-      if (!g) return;
-      L.polyline(toLatLngs(g.line), {
-        color: '#a5682f', weight: mapWidth((node[id] || {}).strahler, 1.5),
-        opacity: 0.95, lineCap: 'round', lineJoin: 'round', interactive: false,
-      }).addTo(previewPane);
+      if (!id || id === currentId || !map.getSource(RIVERS_SOURCE_ID)) return;
+      if (!geo.rivers[id]) return;
+      map.setFeatureState({ source: RIVERS_SOURCE_ID, id }, { preview: true });
     }
     window._catalogMapPreview = paintPreview;
+
+    // --- map -> tree hover/click, via the wide invisible hit layer -------
+    let hoveredId = null;
+    map.on('mousemove', RIVERS_HIT_ID, e => {
+      if (!e.features || !e.features.length) return;
+      const id = e.features[0].properties.id;
+      if (id === hoveredId) return;
+      hoveredId = id;
+      mapEl.style.cursor = 'pointer';
+      if (window._catalogRowPreview) window._catalogRowPreview(id);
+    });
+    map.on('mouseleave', RIVERS_HIT_ID, () => {
+      hoveredId = null;
+      mapEl.style.cursor = '';
+      if (window._catalogRowPreview) window._catalogRowPreview(null);
+    });
+    map.on('click', RIVERS_HIT_ID, e => {
+      if (!e.features || !e.features.length) return;
+      focusOn(e.features[0].properties.id);
+    });
 
     // --- layer switcher UI: basemap radios + hillshade toggle -----------
     const baseRadios = document.querySelectorAll('input[name="maplayer"]');
     baseRadios.forEach(r => r.addEventListener('change', () => {
-      map.removeLayer(ignPlan); if (osm) map.removeLayer(osm);
-      (r.value === 'osm' && osm ? osm : ignPlan).addTo(map);
-      ctxPane.bringToFront(); hiPane.bringToFront();
+      const style = BASEMAPS[r.value];
+      if (!style) return;
+      map.setStyle(style);  // river/mask/outlet layers re-added on 'style.load'
     }));
     const shadeBox = document.getElementById('maphillshade');
     if (shadeBox) shadeBox.addEventListener('change', () => {
-      if (shadeBox.checked) { hillshade.addTo(map); ctxPane.bringToFront(); hiPane.bringToFront(); }
-      else map.removeLayer(hillshade);
+      if (shadeBox.checked) addHillshade(); else removeHillshade();
     });
 
-    const startId = (initialId && geo.rivers[initialId]) ? initialId : meta.root_id;
-    if (geo.rivers[startId]) focusOn(startId, { pushHash: false });
+    map.on('load', () => {
+      const startId = (initialId && geo.rivers[initialId]) ? initialId : meta.root_id;
+      if (geo.rivers[startId]) focusOn(startId, { pushHash: false });
+    });
   })();
 };

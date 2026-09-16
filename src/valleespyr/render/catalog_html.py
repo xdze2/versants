@@ -9,13 +9,15 @@ their own tributary count. Clicking any row re-centers the view on it; a
 breadcrumb above the list shows the full downstream trail back to the root.
 
 When the catalog carries a ``geo`` block (``valleespyr catalog --geo``) a
-second column holds a sticky Leaflet map: an IGN topo or OpenStreetMap
-basemap (with an optional IGN relief-shading overlay), both fetched live from
-public tile servers — this is the one part of the page that needs network
-access. Clicking a row (or a river's line on the map itself) draws just that
-river and its upstream network on top as styled polylines, fit to frame. Each
-line's stroke width scales with the river's Strahler order, with the selected
-river and its network drawn heavier than the faint catchment context.
+second column holds a sticky MapLibre GL map: a custom outdoor-style
+MapTiler basemap when a key is configured (falling back to IGN topo, and
+optionally OpenStreetMap via MapTiler raster tiles, otherwise), with an
+optional IGN relief-shading overlay — all fetched live from public tile/
+style servers, the one part of the page that needs network access. Clicking
+a row (or a river's line on the map itself) draws just that river and its
+upstream network on top as styled lines, fit to frame. Each line's stroke
+width scales with the river's Strahler order, with the selected river and
+its network drawn heavier than the faint catchment context.
 
 ``render_catalog_html(catalog, path)`` writes the file; ``catalog_to_html`` gives
 the string.
@@ -51,10 +53,19 @@ def _maptiler_api_key() -> str | None:
         return None
     return key or None
 
+
+# The custom outdoor-style MapTiler Cloud style (see app_design.md's
+# "Basemap texture" section) — not a secret, just a project config value, so
+# a plain env-overridable constant rather than another *.secret file. Only
+# used when a MapTiler key is also configured; MapTiler's free tier renders
+# a custom style client-side (vector, via MapLibre GL) but not as raster
+# tiles (paid-tier only — "Access to rendered maps not allowed" otherwise).
+_MAPTILER_STYLE_ID = os.environ.get("MAPTILER_STYLE_ID") or "01a0ab2c-1a18-7b37-83c6-14605f4dd408"
+
 # Mini-map (only with a geo block).
 MAP_MIN = 340       # px — floor for the map column on narrow windows
-MAP_H = 560         # px — fixed height of the Leaflet map viewport
-LEAFLET_VERSION = "1.9.4"
+MAP_H = 560         # px — fixed height of the MapLibre map viewport
+MAPLIBRE_VERSION = "4.1.2"
 
 # --- git-graph lane geometry (shared with the client via _GEOM) ------------
 # Two fixed lanes always: 0 is the trunk (back link / selected / mainline
@@ -148,7 +159,7 @@ ol.labels {{ list-style: none; margin: 0; padding: 0; min-width: 0; }}
   background: #fff; overflow: hidden; width: 100%;
 }}
 #map {{ display: block; width: 100%; height: {map_h}px; background: #dde3e7; }}
-#map .leaflet-container {{ font: inherit; background: #dde3e7; }}
+#map .maplibregl-map {{ font: inherit; background: #dde3e7; }}
 #map3d {{
   position: relative; width: 100%; height: {map_h}px; background: #eae4d6;
   overflow: hidden;
@@ -258,10 +269,21 @@ def catalog_to_html(
             '<label><input type="radio" name="maplayer" value="osm"> OpenStreetMap</label>'
             if maptiler_key else ""
         )
+        # The custom style is vector (MapLibre-rendered client-side), so it
+        # needs no separate raster-tile permission — only the key.
+        custom_radio = (
+            '<label><input type="radio" name="maplayer" value="custom" checked> outdoor</label>'
+            if maptiler_key else ""
+        )
+        ign_radio = (
+            f'<label><input type="radio" name="maplayer" value="ign"'
+            f'{" checked" if not maptiler_key else ""}> IGN topo</label>'
+        )
         map_col = (
             f'<div class="mapcol"><div class="mapcard">'
             f'<div class="maplayers">'
-            f'<label><input type="radio" name="maplayer" value="ign" checked> IGN topo</label>'
+            f'{custom_radio}'
+            f'{ign_radio}'
             f'{osm_radio}'
             f'<span class="sep"></span>'
             f'<label><input type="checkbox" id="maphillshade"> relief shading</label>'
@@ -309,7 +331,10 @@ def catalog_to_html(
     if use_3d:
         js = _JS_GEO_3D.replace("__TERRAIN_URL__", json.dumps(terrain_url)) + js
     elif has_geo:
-        js = _JS_GEO.replace("__MAPTILER_KEY__", json.dumps(maptiler_key)) + js
+        js = (
+            _JS_GEO.replace("__MAPTILER_KEY__", json.dumps(maptiler_key))
+            .replace("__MAPTILER_STYLE_ID__", json.dumps(_MAPTILER_STYLE_ID if maptiler_key else None))
+        ) + js
 
     if use_3d:
         leaflet_head = (
@@ -319,8 +344,8 @@ def catalog_to_html(
     elif has_geo:
         leaflet_head = (
             f'<link rel="stylesheet" '
-            f'href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.min.css">'
-            f'<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/{LEAFLET_VERSION}/leaflet.js">'
+            f'href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/{MAPLIBRE_VERSION}/maplibre-gl.min.css">'
+            f'<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/{MAPLIBRE_VERSION}/maplibre-gl.min.js">'
             f"</script>"
         )
     else:
