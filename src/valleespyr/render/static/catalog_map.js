@@ -40,9 +40,18 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
       '&LAYER=GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2&STYLE=normal&FORMAT=image/png' +
       '&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}',
       { maxNativeZoom: 16, maxZoom: 17, attribution: 'Plan IGN — IGN/Geoportail' });
-    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxNativeZoom: 19, maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
-    });
+    // MapTiler's OSM-based raster tiles — tile.openstreetmap.org actively
+    // blocks third-party sites, so we don't hotlink it directly. Needs a
+    // free, origin-restricted API key (see catalog_html.py's
+    // _maptiler_api_key/__MAPTILER_KEY__); the "OpenStreetMap" radio is
+    // omitted from the page entirely when no key is configured, so `osm`
+    // stays unused rather than pointing at a broken URL.
+    const MAPTILER_KEY = __MAPTILER_KEY__;
+    const osm = MAPTILER_KEY && L.tileLayer(
+      `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`, {
+        maxNativeZoom: 20, maxZoom: 20,
+        attribution: '&copy; OpenStreetMap contributors &copy; <a href="https://www.maptiler.com/copyright/">MapTiler</a>',
+      });
     // key-free hillshade ("estompage"), its own tile matrix set (PM_0_15).
     const hillshade = L.tileLayer(
       'https://data.geopf.fr/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
@@ -195,8 +204,8 @@ window._catalogInitGeo = function (data, root, meta, labelsEl, esc, focusOn, ini
     // --- layer switcher UI: basemap radios + hillshade toggle -----------
     const baseRadios = document.querySelectorAll('input[name="maplayer"]');
     baseRadios.forEach(r => r.addEventListener('change', () => {
-      map.removeLayer(ignPlan); map.removeLayer(osm);
-      (r.value === 'osm' ? osm : ignPlan).addTo(map);
+      map.removeLayer(ignPlan); if (osm) map.removeLayer(osm);
+      (r.value === 'osm' && osm ? osm : ignPlan).addTo(map);
       ctxPane.bringToFront(); hiPane.bringToFront();
     }));
     const shadeBox = document.getElementById('maphillshade');

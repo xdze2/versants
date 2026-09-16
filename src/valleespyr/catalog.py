@@ -318,6 +318,15 @@ def build_forest_catalog(
         has_areas = has_areas or cat["meta"]["has_areas"]
         if geo:
             g = cat["geo"]
+            collisions = geo_rivers.keys() & g["rivers"].keys()
+            if collisions:
+                raise ValueError(
+                    f"river id(s) {sorted(collisions)} appear in more than one "
+                    f"root's tree (currently building {name!r}) — river ids are "
+                    "assumed globally unique across roots; a shared id likely "
+                    "means a bifurcation is reachable from two roots, and "
+                    "merging would silently drop one root's geometry for it"
+                )
             geo_rivers.update(g["rivers"])
             if g["bbox"] is not None:
                 w, s, e, n = g["bbox"]

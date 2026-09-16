@@ -25,8 +25,31 @@ from __future__ import annotations
 
 import html
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+# Repo-root fallback for the MapTiler key when MAPTILER_API_KEY isn't set in
+# the environment — a single-line, gitignored (*.secret) file, same pattern
+# as valleespyr.hydro.dem's OpenTopography key. Unlike that key, this one
+# ends up embedded in the shipped HTML/JS (it's fetched client-side, live,
+# per pageview) — "MapTiler key" is a public, origin-restricted key by
+# design, not a traditional secret; keeping it out of *this repo's history*
+# is still worth doing, hence the gitignored file rather than a tracked config.
+_MAPTILER_KEY_FILE = Path(__file__).resolve().parents[3] / "maptiler.secret"
+
+
+def _maptiler_api_key() -> str | None:
+    """The MapTiler API key: ``MAPTILER_API_KEY`` env var, else
+    ``maptiler.secret`` at the repo root, else ``None``."""
+    key = os.environ.get("MAPTILER_API_KEY")
+    if key:
+        return key
+    try:
+        key = _MAPTILER_KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
 
 # Mini-map (only with a geo block).
 MAP_MIN = 340       # px — floor for the map column on narrow windows
@@ -228,13 +251,18 @@ def catalog_to_html(
 
     has_geo = bool(catalog.get("geo") and catalog["geo"].get("rivers"))
     use_3d = has_geo and terrain_url is not None
+    maptiler_key = _maptiler_api_key()
 
     if has_geo and not use_3d:
+        osm_radio = (
+            '<label><input type="radio" name="maplayer" value="osm"> OpenStreetMap</label>'
+            if maptiler_key else ""
+        )
         map_col = (
             f'<div class="mapcol"><div class="mapcard">'
             f'<div class="maplayers">'
             f'<label><input type="radio" name="maplayer" value="ign" checked> IGN topo</label>'
-            f'<label><input type="radio" name="maplayer" value="osm"> OpenStreetMap</label>'
+            f'{osm_radio}'
             f'<span class="sep"></span>'
             f'<label><input type="checkbox" id="maphillshade"> relief shading</label>'
             f"</div>"
@@ -281,7 +309,7 @@ def catalog_to_html(
     if use_3d:
         js = _JS_GEO_3D.replace("__TERRAIN_URL__", json.dumps(terrain_url)) + js
     elif has_geo:
-        js = _JS_GEO + js
+        js = _JS_GEO.replace("__MAPTILER_KEY__", json.dumps(maptiler_key)) + js
 
     if use_3d:
         leaflet_head = (

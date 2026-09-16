@@ -317,6 +317,17 @@ sites instead of siblings in one tree.
       might be worth deriving `height`/`target.y` from the terrain
       payload's `z_min`/`z_max`/`z_exaggeration` instead of horizontal size
       alone, which would shrink how often a hand override is needed at all.
+- [ ] `catalog_forest_cmd` (`cli.py`) duplicates nearly all of `catalog_cmd`'s
+      option declarations and setup/finish orchestration verbatim (bassins /
+      dem_catchments / overrides loading, the `terrain_url` relpath
+      computation, the dump/echo/optional-HTML-render tail) instead of
+      sharing a helper — found in code review of the MapTiler basemap change.
+      Nothing enforces parity between the two option lists, so a future flag
+      or fix can land on one command and silently not the other. Extract
+      something like `_load_catalog_inputs(bassins_path, dem_catchments_path,
+      overrides_path)` and `_finish_catalog(catalog, out_path, html_output,
+      terrain_dir)` helpers (mirroring the existing `_load_troncons_gdf`-style
+      helpers already in `cli.py`) and have both commands call them.
 
 ## 4. Full-Pyrenees / multi-root batch run
 
